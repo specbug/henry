@@ -10,6 +10,7 @@ members = [
     "crates/henry-health",
     "crates/henry-telegram",
     "crates/henry-http",
+    "crates/henry-server",
 ]
 
 [workspace.package]
@@ -44,6 +45,9 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 http = "1"
 
+# Containers
+bollard = "0.18"
+
 # UI
 ratatui = "0.29"
 crossterm = "0.28"
@@ -68,6 +72,7 @@ henry-tui = { path = "crates/henry-tui" }
 henry-health = { path = "crates/henry-health" }
 henry-telegram = { path = "crates/henry-telegram" }
 henry-http = { path = "crates/henry-http" }
+henry-server = { path = "crates/henry-server" }
 
 [profile.release]
 lto = true

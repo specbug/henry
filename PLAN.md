@@ -261,18 +261,13 @@ pub async fn run_server(
 
 ---
 
-## Phase 3: Containers (NEXT)
+## Phase 3: Containers (COMPLETE)
 
-### Create `henry-server` Crate
+**Completed:** 2026-02-04
 
-**Purpose:** Podman/Docker container management
+### Implemented Crate: `henry-server`
 
-### Dependencies to Add
-
-```toml
-# Workspace Cargo.toml
-bollard = "0.18"  # Docker/Podman API client
-```
+**Purpose:** Podman/Docker container management via bollard
 
 ### Directory Structure
 
@@ -280,81 +275,55 @@ bollard = "0.18"  # Docker/Podman API client
 crates/henry-server/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs          # ContainerManager, run_container_service()
-    ├── podman.rs       # Podman-specific socket detection
-    └── types.rs        # ContainerInfo, ContainerStatus enums
+    ├── lib.rs          # ContainerManager, ServerModule
+    ├── podman.rs       # Podman/Colima socket auto-detection
+    └── types.rs        # ContainerInfo, ContainerStatus, ContainerDetail
 ```
 
 ### Key Features
 
 1. **Container lifecycle**: start, stop, restart, logs, inspect
-2. **Podman socket detection**: `$XDG_RUNTIME_DIR/podman/podman.sock` or `/run/user/$UID/podman/podman.sock`
-3. **List containers** with status, image, ports, uptime
-4. **Tail logs** with optional follow mode
-5. **Health integration**: Update module health based on container states
+2. **Smart socket detection**: Supports Podman, Docker, and Colima
+   - `$XDG_RUNTIME_DIR/podman/podman.sock`
+   - `/run/user/$UID/podman/podman.sock`
+   - `~/.local/share/containers/podman/machine/podman.sock`
+   - `/var/run/docker.sock`
+   - `~/.colima/default/docker.sock`
+3. **Container allowlist**: Restrict which containers can be managed
+4. **Secret filtering**: Hides sensitive env vars in inspect output
+5. **Health integration**: Updates module health based on runtime availability
 
-### Config Additions
+### Config
 
 ```toml
 [containers]
 enabled = true
 use_podman = true
 socket_path = ""  # Auto-detect if empty
-# Allowlist of containers Henry can manage (empty = all)
-allowed_containers = []
+allowed_containers = []  # Empty = all allowed
 ```
 
-### API Pattern
+### Telegram Commands
 
-```rust
-pub struct ContainerManager {
-    docker: Docker,  // bollard client (works with Podman too)
-    config: ContainerConfig,
-}
-
-impl ContainerManager {
-    pub async fn new(config: ContainerConfig) -> Result<Self, ContainerError>;
-    pub async fn list(&self) -> Result<Vec<ContainerInfo>, ContainerError>;
-    pub async fn start(&self, name: &str) -> Result<(), ContainerError>;
-    pub async fn stop(&self, name: &str) -> Result<(), ContainerError>;
-    pub async fn restart(&self, name: &str) -> Result<(), ContainerError>;
-    pub async fn logs(&self, name: &str, tail: usize) -> Result<String, ContainerError>;
-    pub async fn inspect(&self, name: &str) -> Result<ContainerDetail, ContainerError>;
-}
-```
-
-### Commands to Add
-
-**Telegram:**
 - `/containers` - List all containers with status
 - `/container start <name>` - Start a container
 - `/container stop <name>` - Stop a container
 - `/container restart <name>` - Restart a container
-- `/container logs <name>` - Get last 50 lines of logs
+- `/container logs <name> [tail]` - Get logs (default: 50 lines)
 
-**HTTP API:**
-- `GET /api/containers` - List containers
+### HTTP API Endpoints
+
+- `GET /api/containers` - List all containers
+- `GET /api/containers/{name}` - Inspect container details
 - `POST /api/containers/{name}/start` - Start container
 - `POST /api/containers/{name}/stop` - Stop container
 - `POST /api/containers/{name}/restart` - Restart container
-- `GET /api/containers/{name}/logs?tail=50` - Get logs
+- `GET /api/containers/{name}/logs?tail=50` - Get container logs
 
-### Integration Steps
+### Tests
 
-1. Create `henry-server` crate with bollard
-2. Add socket auto-detection for Podman on macOS
-3. Implement ContainerManager with list/start/stop/restart/logs
-4. Add container commands to `henry-telegram`
-5. Add container endpoints to `henry-http`
-6. Wire into daemon with health updates
-7. Add tests for container operations (mock Docker API)
-
-### Podman on macOS Notes
-
-- Socket typically at: `/var/run/docker.sock` (if podman-mac-helper installed)
-- Or: `$HOME/.local/share/containers/podman/machine/podman.sock`
-- Use `podman machine inspect` to find socket path
-- bollard works with Podman API (Docker-compatible)
+10 new unit tests (35 total):
+- `henry-server`: 10 tests (container status parsing, allowlist filtering, secret detection, socket detection)
 
 ---
 

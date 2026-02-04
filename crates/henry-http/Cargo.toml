@@ -26,6 +26,7 @@ http.workspace = true
 # Internal crates
 henry-config.workspace = true
 henry-health.workspace = true
+henry-server.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

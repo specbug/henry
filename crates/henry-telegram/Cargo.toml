@@ -23,6 +23,7 @@ teloxide.workspace = true
 henry-config.workspace = true
 henry-health.workspace = true
 henry-secrets.workspace = true
+henry-server.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

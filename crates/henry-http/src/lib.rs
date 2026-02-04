@@ -1,18 +1,19 @@
 //! HTTP API server for Henry daemon.
 //!
-//! Provides REST endpoints for status, health, and module information.
+//! Provides REST endpoints for status, health, module, and container information.
 
 use axum::{
-    extract::State,
-    http::{header, Method},
+    extract::{Path, Query, State},
+    http::{header, Method, StatusCode},
     middleware,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use henry_config::HttpConfig;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth, SystemMetrics};
-use serde::Serialize;
+use henry_server::{ContainerInfo, ContainerManager};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -39,6 +40,7 @@ pub struct AppState {
     pub health: Arc<RwLock<HealthManager>>,
     pub config: HttpConfig,
     pub api_token: Option<String>,
+    pub containers: Option<Arc<RwLock<ContainerManager>>>,
 }
 
 /// Health check response.
@@ -88,12 +90,14 @@ pub async fn run_server(
     bind_addr: &str,
     health: Arc<RwLock<HealthManager>>,
     api_token: Option<String>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), HttpError> {
     let state = AppState {
         health,
         config: config.clone(),
         api_token: api_token.clone(),
+        containers,
     };
 
     let app = create_router(state);
@@ -129,7 +133,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/status", get(handle_status))
         .route("/modules", get(handle_modules))
         .route("/metrics", get(handle_metrics))
-        .route("/snapshot", get(handle_snapshot));
+        .route("/snapshot", get(handle_snapshot))
+        // Container endpoints
+        .route("/containers", get(handle_containers))
+        .route("/containers/{name}", get(handle_container_inspect))
+        .route("/containers/{name}/start", post(handle_container_start))
+        .route("/containers/{name}/stop", post(handle_container_stop))
+        .route("/containers/{name}/restart", post(handle_container_restart))
+        .route("/containers/{name}/logs", get(handle_container_logs));
 
     // Apply auth middleware if token is configured
     let api_routes = if state.api_token.is_some() {
@@ -207,6 +218,177 @@ async fn handle_snapshot(State(state): State<AppState>) -> impl IntoResponse {
     Json(snapshot)
 }
 
+// Container response types
+#[derive(Serialize)]
+pub struct ContainersResponse {
+    pub containers: Vec<ContainerInfo>,
+}
+
+#[derive(Serialize)]
+pub struct ContainerActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct ContainerLogsResponse {
+    pub name: String,
+    pub logs: String,
+}
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    pub tail: Option<usize>,
+}
+
+async fn handle_containers(
+    State(state): State<AppState>,
+) -> Result<Json<ContainersResponse>, (StatusCode, String)> {
+    let Some(ref containers) = state.containers else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Containers module not enabled".to_string(),
+        ));
+    };
+
+    let manager = containers.read().await;
+    match manager.list(true).await {
+        Ok(containers) => Ok(Json(ContainersResponse { containers })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_container_inspect(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let Some(ref containers) = state.containers else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Containers module not enabled".to_string(),
+        ));
+    };
+
+    let manager = containers.read().await;
+    match manager.inspect(&name).await {
+        Ok(detail) => Ok(Json(detail)),
+        Err(henry_server::ContainerError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("Container not found: {}", name)))
+        }
+        Err(henry_server::ContainerError::NotAllowed(_)) => {
+            Err((StatusCode::FORBIDDEN, format!("Container not in allowlist: {}", name)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_container_start(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ContainerActionResponse>, (StatusCode, String)> {
+    let Some(ref containers) = state.containers else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Containers module not enabled".to_string(),
+        ));
+    };
+
+    let manager = containers.read().await;
+    match manager.start(&name).await {
+        Ok(()) => Ok(Json(ContainerActionResponse {
+            success: true,
+            message: format!("Started container: {}", name),
+        })),
+        Err(henry_server::ContainerError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("Container not found: {}", name)))
+        }
+        Err(henry_server::ContainerError::NotAllowed(_)) => {
+            Err((StatusCode::FORBIDDEN, format!("Container not in allowlist: {}", name)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_container_stop(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ContainerActionResponse>, (StatusCode, String)> {
+    let Some(ref containers) = state.containers else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Containers module not enabled".to_string(),
+        ));
+    };
+
+    let manager = containers.read().await;
+    match manager.stop(&name).await {
+        Ok(()) => Ok(Json(ContainerActionResponse {
+            success: true,
+            message: format!("Stopped container: {}", name),
+        })),
+        Err(henry_server::ContainerError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("Container not found: {}", name)))
+        }
+        Err(henry_server::ContainerError::NotAllowed(_)) => {
+            Err((StatusCode::FORBIDDEN, format!("Container not in allowlist: {}", name)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_container_restart(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ContainerActionResponse>, (StatusCode, String)> {
+    let Some(ref containers) = state.containers else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Containers module not enabled".to_string(),
+        ));
+    };
+
+    let manager = containers.read().await;
+    match manager.restart(&name).await {
+        Ok(()) => Ok(Json(ContainerActionResponse {
+            success: true,
+            message: format!("Restarted container: {}", name),
+        })),
+        Err(henry_server::ContainerError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("Container not found: {}", name)))
+        }
+        Err(henry_server::ContainerError::NotAllowed(_)) => {
+            Err((StatusCode::FORBIDDEN, format!("Container not in allowlist: {}", name)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_container_logs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<ContainerLogsResponse>, (StatusCode, String)> {
+    let Some(ref containers) = state.containers else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Containers module not enabled".to_string(),
+        ));
+    };
+
+    let tail = query.tail.unwrap_or(50);
+    let manager = containers.read().await;
+    match manager.logs(&name, tail).await {
+        Ok(logs) => Ok(Json(ContainerLogsResponse { name, logs })),
+        Err(henry_server::ContainerError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("Container not found: {}", name)))
+        }
+        Err(henry_server::ContainerError::NotAllowed(_)) => {
+            Err((StatusCode::FORBIDDEN, format!("Container not in allowlist: {}", name)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +401,7 @@ mod tests {
             health: Arc::new(RwLock::new(HealthManager::new("0.1.0-test"))),
             config: HttpConfig::default(),
             api_token: None,
+            containers: None,
         }
     }
 

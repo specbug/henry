@@ -45,6 +45,8 @@ enabled = true
 use_podman = true
 # Optional: explicit socket path (auto-detected if not set)
 # socket_path = "/run/user/501/podman/podman.sock"
+# Allowlist of containers Henry can manage (empty = all)
+allowed_containers = []
 
 [media]
 enabled = false

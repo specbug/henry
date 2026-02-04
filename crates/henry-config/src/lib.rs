@@ -161,6 +161,8 @@ pub struct ContainerConfig {
     pub use_podman: bool,
     /// Socket path (auto-detected if empty).
     pub socket_path: Option<String>,
+    /// Allowlist of containers Henry can manage (empty = all).
+    pub allowed_containers: Vec<String>,
 }
 
 impl Default for ContainerConfig {
@@ -169,6 +171,7 @@ impl Default for ContainerConfig {
             enabled: true,
             use_podman: true,
             socket_path: None,
+            allowed_containers: vec![],
         }
     }
 }

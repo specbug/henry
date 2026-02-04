@@ -1,0 +1,24 @@
+[package]
+name = "henry-server"
+description = "Container management (Podman/Docker) for Henry daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+henry-config = { workspace = true }
+
+tokio = { workspace = true }
+bollard = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

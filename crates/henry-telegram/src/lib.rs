@@ -4,6 +4,7 @@
 
 use henry_config::TelegramConfig;
 use henry_health::{format_bytes, format_duration, HealthManager, HealthStatus};
+use henry_server::ContainerManager;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
@@ -41,6 +42,10 @@ pub enum Command {
     Modules,
     #[command(description = "show system metrics")]
     Metrics,
+    #[command(description = "list all containers")]
+    Containers,
+    #[command(description = "container action: start|stop|restart|logs <name>")]
+    Container(String),
     #[command(description = "start the bot")]
     Start,
 }
@@ -49,6 +54,7 @@ pub enum Command {
 pub struct BotState {
     pub health: Arc<RwLock<HealthManager>>,
     pub config: TelegramConfig,
+    pub containers: Option<Arc<RwLock<ContainerManager>>>,
 }
 
 /// Create and run the Telegram bot.
@@ -56,6 +62,7 @@ pub async fn run_bot(
     token: String,
     config: TelegramConfig,
     health: Arc<RwLock<HealthManager>>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), TelegramError> {
     if token.is_empty() {
@@ -66,6 +73,7 @@ pub async fn run_bot(
     let state = Arc::new(BotState {
         health,
         config: config.clone(),
+        containers,
     });
 
     info!("Starting Telegram bot");
@@ -147,6 +155,8 @@ async fn handle_command(
         Command::Status => format_status(&state).await,
         Command::Modules => format_modules(&state).await,
         Command::Metrics => format_metrics(&state).await,
+        Command::Containers => format_containers(&state).await,
+        Command::Container(args) => handle_container_command(&state, &args).await,
     };
 
     bot.send_message(msg.chat.id, response).await?;
@@ -232,6 +242,105 @@ async fn format_metrics(state: &BotState) -> String {
     }
 
     lines.join("\n")
+}
+
+async fn format_containers(state: &BotState) -> String {
+    let Some(ref containers) = state.containers else {
+        return "Containers module not enabled.".to_string();
+    };
+
+    let manager = containers.read().await;
+    match manager.list(true).await {
+        Ok(containers) => {
+            if containers.is_empty() {
+                return "No containers found.".to_string();
+            }
+
+            let mut lines = vec!["Containers:".to_string()];
+            for c in containers {
+                let status = match c.status {
+                    henry_server::ContainerStatus::Running => "RUN",
+                    henry_server::ContainerStatus::Exited => "EXIT",
+                    henry_server::ContainerStatus::Paused => "PAUSE",
+                    _ => "?",
+                };
+                lines.push(format!("  {} {} ({})", status, c.name, c.image));
+            }
+            lines.join("\n")
+        }
+        Err(e) => format!("Error listing containers: {}", e),
+    }
+}
+
+async fn handle_container_command(state: &BotState, args: &str) -> String {
+    let Some(ref containers) = state.containers else {
+        return "Containers module not enabled.".to_string();
+    };
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    if parts.is_empty() {
+        return "Usage: /container <start|stop|restart|logs> <name>".to_string();
+    }
+
+    let action = parts[0].to_lowercase();
+    let name = parts.get(1).map(|s| *s);
+
+    match action.as_str() {
+        "start" => {
+            let Some(name) = name else {
+                return "Usage: /container start <name>".to_string();
+            };
+            let manager = containers.read().await;
+            match manager.start(name).await {
+                Ok(()) => format!("Started container: {}", name),
+                Err(e) => format!("Error starting {}: {}", name, e),
+            }
+        }
+        "stop" => {
+            let Some(name) = name else {
+                return "Usage: /container stop <name>".to_string();
+            };
+            let manager = containers.read().await;
+            match manager.stop(name).await {
+                Ok(()) => format!("Stopped container: {}", name),
+                Err(e) => format!("Error stopping {}: {}", name, e),
+            }
+        }
+        "restart" => {
+            let Some(name) = name else {
+                return "Usage: /container restart <name>".to_string();
+            };
+            let manager = containers.read().await;
+            match manager.restart(name).await {
+                Ok(()) => format!("Restarted container: {}", name),
+                Err(e) => format!("Error restarting {}: {}", name, e),
+            }
+        }
+        "logs" => {
+            let Some(name) = name else {
+                return "Usage: /container logs <name>".to_string();
+            };
+            let tail = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
+            let manager = containers.read().await;
+            match manager.logs(name, tail).await {
+                Ok(logs) => {
+                    if logs.is_empty() {
+                        format!("No logs for container: {}", name)
+                    } else {
+                        // Truncate if too long for Telegram (max 4096 chars)
+                        let max_len = 4000;
+                        if logs.len() > max_len {
+                            format!("Logs for {} (truncated):\n```\n{}...\n```", name, &logs[..max_len])
+                        } else {
+                            format!("Logs for {}:\n```\n{}\n```", name, logs)
+                        }
+                    }
+                }
+                Err(e) => format!("Error getting logs for {}: {}", name, e),
+            }
+        }
+        _ => "Usage: /container <start|stop|restart|logs> <name>".to_string(),
+    }
 }
 
 #[cfg(test)]

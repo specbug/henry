@@ -4,6 +4,7 @@ use henry_config::Config;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
 use henry_secrets::SecretManager;
+use henry_server::ContainerManager;
 use henry_state::StateManager;
 use henry_tui::{ui, App, Event, EventHandler, Terminal};
 use std::path::PathBuf;
@@ -38,6 +39,9 @@ pub enum DaemonError {
     #[error("http error: {0}")]
     Http(#[from] henry_http::HttpError),
 
+    #[error("container error: {0}")]
+    Container(#[from] henry_server::ContainerError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -50,6 +54,7 @@ pub struct Daemon {
     state: StateManager,
     health: Arc<RwLock<HealthManager>>,
     secrets: SecretManager,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
     shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -93,6 +98,22 @@ impl Daemon {
         // Create shutdown broadcast channel
         let (shutdown_tx, _) = broadcast::channel(1);
 
+        // Initialize container manager if enabled
+        let containers = if config.containers.enabled {
+            match ContainerManager::new(config.containers.clone()).await {
+                Ok(manager) => {
+                    info!("Container manager initialized");
+                    Some(Arc::new(RwLock::new(manager)))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize container manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             config_path,
@@ -100,6 +121,7 @@ impl Daemon {
             state,
             health,
             secrets,
+            containers,
             shutdown_tx,
         })
     }
@@ -254,11 +276,31 @@ impl Daemon {
 
     /// Start communication services (Telegram, HTTP).
     async fn start_services(&mut self) -> Result<(), DaemonError> {
+        // Update container module health
+        if self.config.containers.enabled {
+            if self.containers.is_some() {
+                self.health
+                    .write()
+                    .await
+                    .update_module(ModuleHealth::new("server").healthy())
+                    .await;
+            } else {
+                self.health
+                    .write()
+                    .await
+                    .update_module(
+                        ModuleHealth::new("server").unhealthy("No container runtime found"),
+                    )
+                    .await;
+            }
+        }
+
         // Start HTTP server if enabled
         if self.config.http.enabled {
             let http_config = self.config.http.clone();
             let bind_addr = self.config.network.bind_address.clone();
             let health = self.health.clone();
+            let containers = self.containers.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Resolve API token if configured
@@ -275,9 +317,15 @@ impl Daemon {
             };
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    henry_http::run_server(http_config, &bind_addr, health, api_token, shutdown_rx)
-                        .await
+                if let Err(e) = henry_http::run_server(
+                    http_config,
+                    &bind_addr,
+                    health,
+                    api_token,
+                    containers,
+                    shutdown_rx,
+                )
+                .await
                 {
                     error!("HTTP server error: {}", e);
                 }
@@ -295,6 +343,7 @@ impl Daemon {
         if self.config.telegram.enabled {
             let telegram_config = self.config.telegram.clone();
             let health = self.health.clone();
+            let containers = self.containers.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Get bot token from 1Password
@@ -316,7 +365,8 @@ impl Daemon {
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    henry_telegram::run_bot(token, telegram_config, health, shutdown_rx).await
+                    henry_telegram::run_bot(token, telegram_config, health, containers, shutdown_rx)
+                        .await
                 {
                     error!("Telegram bot error: {}", e);
                 }
