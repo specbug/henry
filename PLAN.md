@@ -466,7 +466,7 @@ pub async fn run_bot(
 
 ## Phase 5: AI Integration (COMPLETE)
 
-**Commit:** `TBD` on branch `init`
+**Commit:** `218c461af` on branch `init`
 **Completed:** 2026-02-05
 
 ### Implemented Crate: `henry-claude`
