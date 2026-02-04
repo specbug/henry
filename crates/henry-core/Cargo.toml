@@ -20,6 +20,7 @@ henry-telegram = { workspace = true }
 henry-http = { workspace = true }
 henry-server = { workspace = true }
 henry-media = { workspace = true }
+henry-claude = { workspace = true }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

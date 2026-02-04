@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use henry_claude::{ClaudeManager, ClaudeStatus, SessionInfo};
 use henry_config::HttpConfig;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth, SystemMetrics};
 use henry_media::{MediaLibrary, MediaManager, MediaStatus, PlaybackSession};
@@ -43,6 +44,7 @@ pub struct AppState {
     pub api_token: Option<String>,
     pub containers: Option<Arc<RwLock<ContainerManager>>>,
     pub media: Option<Arc<RwLock<MediaManager>>>,
+    pub claude: Option<Arc<RwLock<ClaudeManager>>>,
 }
 
 /// Health check response.
@@ -94,6 +96,7 @@ pub async fn run_server(
     api_token: Option<String>,
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), HttpError> {
     let state = AppState {
@@ -102,6 +105,7 @@ pub async fn run_server(
         api_token: api_token.clone(),
         containers,
         media,
+        claude,
     };
 
     let app = create_router(state);
@@ -153,7 +157,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/media/start", post(handle_media_start))
         .route("/media/stop", post(handle_media_stop))
         .route("/media/restart", post(handle_media_restart))
-        .route("/media/logs", get(handle_media_logs));
+        .route("/media/logs", get(handle_media_logs))
+        // Claude endpoints
+        .route("/claude/status", get(handle_claude_status))
+        .route("/claude/sessions", get(handle_claude_sessions))
+        .route("/claude/sessions/new", post(handle_claude_new_session))
+        .route("/claude/sessions/{id}", get(handle_claude_get_session))
+        .route("/claude/sessions/{id}/stop", post(handle_claude_stop_session))
+        .route("/claude/ask", post(handle_claude_ask));
 
     // Apply auth middleware if token is configured
     let api_routes = if state.api_token.is_some() {
@@ -567,6 +578,172 @@ async fn handle_media_logs(
     }
 }
 
+// Claude response types
+#[derive(Serialize)]
+pub struct ClaudeSessionsResponse {
+    pub sessions: Vec<SessionInfo>,
+}
+
+#[derive(Deserialize)]
+pub struct NewSessionRequest {
+    pub workspace: String,
+}
+
+#[derive(Serialize)]
+pub struct ClaudeActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Deserialize)]
+pub struct AskRequest {
+    pub question: String,
+    pub model: Option<String>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct AskResponse {
+    pub response: String,
+    pub model: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+async fn handle_claude_status(
+    State(state): State<AppState>,
+) -> Result<Json<ClaudeStatus>, (StatusCode, String)> {
+    let Some(ref claude) = state.claude else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Claude module not enabled".to_string(),
+        ));
+    };
+
+    let manager = claude.read().await;
+    Ok(Json(manager.status().await))
+}
+
+async fn handle_claude_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<ClaudeSessionsResponse>, (StatusCode, String)> {
+    let Some(ref claude) = state.claude else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Claude module not enabled".to_string(),
+        ));
+    };
+
+    let manager = claude.read().await;
+    let sessions = manager.list_sessions().await;
+    Ok(Json(ClaudeSessionsResponse { sessions }))
+}
+
+async fn handle_claude_new_session(
+    State(state): State<AppState>,
+    Json(request): Json<NewSessionRequest>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let Some(ref claude) = state.claude else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Claude module not enabled".to_string(),
+        ));
+    };
+
+    let manager = claude.read().await;
+    match manager.new_session(&request.workspace).await {
+        Ok(session) => Ok(Json(session)),
+        Err(henry_claude::ClaudeError::Session(henry_claude::SessionError::MaxSessionsReached(max))) => {
+            Err((StatusCode::TOO_MANY_REQUESTS, format!("Max sessions reached: {}", max)))
+        }
+        Err(henry_claude::ClaudeError::Session(henry_claude::SessionError::SessionExists(ws))) => {
+            Err((StatusCode::CONFLICT, format!("Session already exists for workspace: {}", ws)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_claude_get_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let Some(ref claude) = state.claude else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Claude module not enabled".to_string(),
+        ));
+    };
+
+    let manager = claude.read().await;
+    match manager.get_session(&id).await {
+        Some(session) => Ok(Json(session)),
+        None => Err((StatusCode::NOT_FOUND, format!("Session not found: {}", id))),
+    }
+}
+
+async fn handle_claude_stop_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ClaudeActionResponse>, (StatusCode, String)> {
+    let Some(ref claude) = state.claude else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Claude module not enabled".to_string(),
+        ));
+    };
+
+    let manager = claude.read().await;
+    match manager.stop_session(&id).await {
+        Ok(()) => Ok(Json(ClaudeActionResponse {
+            success: true,
+            message: format!("Stopped session: {}", id),
+        })),
+        Err(henry_claude::ClaudeError::Session(henry_claude::SessionError::SessionNotFound(_))) => {
+            Err((StatusCode::NOT_FOUND, format!("Session not found: {}", id)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_claude_ask(
+    State(state): State<AppState>,
+    Json(request): Json<AskRequest>,
+) -> Result<Json<AskResponse>, (StatusCode, String)> {
+    let Some(ref claude) = state.claude else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Claude module not enabled".to_string(),
+        ));
+    };
+
+    let manager = claude.read().await;
+    let messages = vec![henry_claude::Message::user(&request.question)];
+
+    match manager
+        .send_message(
+            &messages,
+            request.model.as_deref(),
+            request.max_tokens,
+            None,
+        )
+        .await
+    {
+        Ok(response) => Ok(Json(AskResponse {
+            response: response.content,
+            model: response.model,
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+        })),
+        Err(henry_claude::ClaudeError::NotConfigured) => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, "API key not configured".to_string()))
+        }
+        Err(henry_claude::ClaudeError::Api(e)) => {
+            Err((StatusCode::BAD_GATEWAY, format!("Anthropic API error: {}", e)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +758,7 @@ mod tests {
             api_token: None,
             containers: None,
             media: None,
+            claude: None,
         }
     }
 

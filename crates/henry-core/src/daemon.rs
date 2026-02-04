@@ -1,5 +1,6 @@
 //! Main daemon implementation.
 
+use henry_claude::ClaudeManager;
 use henry_config::Config;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
@@ -46,6 +47,9 @@ pub enum DaemonError {
     #[error("media error: {0}")]
     Media(#[from] henry_media::MediaError),
 
+    #[error("claude error: {0}")]
+    Claude(#[from] henry_claude::ClaudeError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -60,6 +64,7 @@ pub struct Daemon {
     secrets: SecretManager,
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,
     shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -144,6 +149,23 @@ impl Daemon {
             None
         };
 
+        // Initialize Claude manager if enabled
+        let claude = if config.claude.enabled {
+            let api_key = match secrets.get(&config.claude.api_key_ref).await {
+                Ok(key) => Some(key),
+                Err(e) => {
+                    warn!("Failed to get Anthropic API key: {}", e);
+                    None
+                }
+            };
+
+            let manager = ClaudeManager::new(config.claude.clone(), api_key);
+            info!("Claude manager initialized");
+            Some(Arc::new(RwLock::new(manager)))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             config_path,
@@ -153,6 +175,7 @@ impl Daemon {
             secrets,
             containers,
             media,
+            claude,
             shutdown_tx,
         })
     }
@@ -367,6 +390,37 @@ impl Daemon {
             }
         }
 
+        // Update Claude module health
+        if self.config.claude.enabled {
+            if let Some(ref claude) = self.claude {
+                let manager = claude.read().await;
+                if manager.has_api_client() {
+                    self.health
+                        .write()
+                        .await
+                        .update_module(ModuleHealth::new("claude").healthy())
+                        .await;
+                } else {
+                    self.health
+                        .write()
+                        .await
+                        .update_module(
+                            ModuleHealth::new("claude")
+                                .unhealthy("API key not configured"),
+                        )
+                        .await;
+                }
+            } else {
+                self.health
+                    .write()
+                    .await
+                    .update_module(
+                        ModuleHealth::new("claude").unhealthy("Claude manager not initialized"),
+                    )
+                    .await;
+            }
+        }
+
         // Start HTTP server if enabled
         if self.config.http.enabled {
             let http_config = self.config.http.clone();
@@ -374,6 +428,7 @@ impl Daemon {
             let health = self.health.clone();
             let containers = self.containers.clone();
             let media = self.media.clone();
+            let claude = self.claude.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Resolve API token if configured
@@ -397,6 +452,7 @@ impl Daemon {
                     api_token,
                     containers,
                     media,
+                    claude,
                     shutdown_rx,
                 )
                 .await
@@ -419,6 +475,7 @@ impl Daemon {
             let health = self.health.clone();
             let containers = self.containers.clone();
             let media = self.media.clone();
+            let claude = self.claude.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Get bot token from 1Password
@@ -440,7 +497,7 @@ impl Daemon {
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    henry_telegram::run_bot(token, telegram_config, health, containers, media, shutdown_rx)
+                    henry_telegram::run_bot(token, telegram_config, health, containers, media, claude, shutdown_rx)
                         .await
                 {
                     error!("Telegram bot error: {}", e);

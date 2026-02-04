@@ -464,18 +464,120 @@ pub async fn run_bot(
 
 ---
 
-## Phase 5: AI Integration (NEXT)
+## Phase 5: AI Integration (COMPLETE)
 
-### `henry-claude`
-- Anthropic API client
-- Claude Code process spawning
-- Session management
-- Workspace isolation per session
+**Commit:** `TBD` on branch `init`
+**Completed:** 2026-02-05
 
-### Commands
-- `/claude new <workspace>` - Start new session
-- `/claude list` - Show active sessions
-- `/claude stop <id>` - Stop session
+### Implemented Crate: `henry-claude`
+
+**Purpose:** Anthropic API client and Claude Code session management with workspace isolation
+
+### Directory Structure
+
+```
+crates/henry-claude/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # ClaudeManager, ClaudeError, public API
+    ├── api.rs          # AnthropicClient, Messages API integration
+    ├── session.rs      # SessionManager, Claude Code process spawning
+    └── types.rs        # SessionInfo, SessionStatus, ClaudeStatus, Message types
+```
+
+### Key Features
+
+1. **Anthropic API client**: Direct access to Claude via Messages API
+2. **Claude Code process spawning**: Start/stop Claude Code CLI sessions
+3. **Session management**: Track multiple concurrent sessions with status updates
+4. **Workspace isolation**: Each session runs in its own workspace directory
+5. **API key via 1Password**: Secure credential storage via `op://` references
+6. **Session lifecycle tracking**: Starting, Running, Stopping, Stopped, Error states
+
+### Config
+
+```toml
+[claude]
+enabled = true
+api_key_ref = "op://Private/Anthropic API/credential"
+max_sessions = 4
+workspace_dir = "~/claude-workspaces"
+```
+
+### Telegram Commands
+
+- `/claude` or `/claude status` - Show Claude module status
+- `/claude list` or `/claude sessions` - List all sessions
+- `/claude new <workspace>` - Start new Claude Code session
+- `/claude stop <id>` - Stop a session
+- `/claude ask <question>` - Send a question to Claude via API
+
+### HTTP API Endpoints
+
+- `GET /api/claude/status` - Full Claude module status
+- `GET /api/claude/sessions` - List all sessions
+- `POST /api/claude/sessions/new` - Start new session (body: `{"workspace": "name"}`)
+- `GET /api/claude/sessions/{id}` - Get session details
+- `POST /api/claude/sessions/{id}/stop` - Stop a session
+- `POST /api/claude/ask` - Send message to Claude API (body: `{"question": "...", "model": "...", "max_tokens": N}`)
+
+### Tests
+
+21 new unit tests (72 total):
+- `henry-claude` types: 4 tests (session status, lifecycle, error state, message creation)
+- `henry-claude` api: 4 tests (client creation, custom base URL, request serialization)
+- `henry-claude` session: 6 tests (manager creation, workspace resolution, session operations)
+- `henry-claude` lib: 7 tests (manager configuration, status, session formatting)
+
+### Code Patterns (Updated)
+
+**Service signatures now include claude** (in `daemon.rs`):
+```rust
+// Shared Claude manager
+let claude: Option<Arc<RwLock<ClaudeManager>>> = if config.claude.enabled {
+    let api_key = match secrets.get(&config.claude.api_key_ref).await {
+        Ok(key) => Some(key),
+        Err(e) => { warn!("Failed to get Anthropic API key: {}", e); None }
+    };
+    let manager = ClaudeManager::new(config.claude.clone(), api_key);
+    Some(Arc::new(RwLock::new(manager)))
+} else { None };
+
+// Pass to services
+henry_http::run_server(config, &bind_addr, health, api_token, containers, media, claude, shutdown_rx)
+henry_telegram::run_bot(token, config, health, containers, media, claude, shutdown_rx)
+```
+
+**HTTP server signature**:
+```rust
+pub async fn run_server(
+    config: HttpConfig,
+    bind_addr: &str,
+    health: Arc<RwLock<HealthManager>>,
+    api_token: Option<String>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), HttpError>
+```
+
+**Telegram bot signature**:
+```rust
+pub async fn run_bot(
+    token: String,
+    config: TelegramConfig,
+    health: Arc<RwLock<HealthManager>>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), TelegramError>
+```
+
+### Binary
+
+- Size: 12MB (release, LTO, stripped) - up from 10MB due to uuid, which, serde_json deps
 
 ---
 

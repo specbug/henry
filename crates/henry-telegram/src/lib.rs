@@ -2,6 +2,7 @@
 //!
 //! Provides a Telegram bot interface with allowlist authentication.
 
+use henry_claude::{format_session, ClaudeManager};
 use henry_config::TelegramConfig;
 use henry_health::{format_bytes, format_duration, HealthManager, HealthStatus};
 use henry_media::{format_ticks, MediaManager};
@@ -49,6 +50,8 @@ pub enum Command {
     Container(String),
     #[command(description = "media status and info")]
     Media(String),
+    #[command(description = "claude session management: new|list|stop|ask")]
+    Claude(String),
     #[command(description = "start the bot")]
     Start,
 }
@@ -59,6 +62,7 @@ pub struct BotState {
     pub config: TelegramConfig,
     pub containers: Option<Arc<RwLock<ContainerManager>>>,
     pub media: Option<Arc<RwLock<MediaManager>>>,
+    pub claude: Option<Arc<RwLock<ClaudeManager>>>,
 }
 
 /// Create and run the Telegram bot.
@@ -68,6 +72,7 @@ pub async fn run_bot(
     health: Arc<RwLock<HealthManager>>,
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), TelegramError> {
     if token.is_empty() {
@@ -80,6 +85,7 @@ pub async fn run_bot(
         config: config.clone(),
         containers,
         media,
+        claude,
     });
 
     info!("Starting Telegram bot");
@@ -164,6 +170,7 @@ async fn handle_command(
         Command::Containers => format_containers(&state).await,
         Command::Container(args) => handle_container_command(&state, &args).await,
         Command::Media(args) => handle_media_command(&state, &args).await,
+        Command::Claude(args) => handle_claude_command(&state, &args).await,
     };
 
     bot.send_message(msg.chat.id, response).await?;
@@ -500,6 +507,102 @@ async fn format_media_sessions(media: &Arc<RwLock<MediaManager>>) -> String {
         }
         Err(e) => format!("Error fetching sessions: {}", e),
     }
+}
+
+async fn handle_claude_command(state: &BotState, args: &str) -> String {
+    let Some(ref claude) = state.claude else {
+        return "Claude module not enabled.".to_string();
+    };
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let action = parts.first().map(|s| s.to_lowercase());
+
+    match action.as_deref() {
+        None | Some("status") => format_claude_status(claude).await,
+        Some("list") | Some("sessions") => format_claude_sessions(claude).await,
+        Some("new") => {
+            let workspace = parts.get(1).map(|s| *s);
+            let Some(workspace) = workspace else {
+                return "Usage: /claude new <workspace>".to_string();
+            };
+            let manager = claude.read().await;
+            match manager.new_session(workspace).await {
+                Ok(session) => format!(
+                    "Started Claude Code session:\n  ID: {}\n  Workspace: {}\n  PID: {}",
+                    session.id,
+                    session.workspace,
+                    session.pid.map(|p| p.to_string()).unwrap_or_else(|| "N/A".to_string())
+                ),
+                Err(e) => format!("Error starting session: {}", e),
+            }
+        }
+        Some("stop") => {
+            let session_id = parts.get(1).map(|s| *s);
+            let Some(session_id) = session_id else {
+                return "Usage: /claude stop <session_id>".to_string();
+            };
+            let manager = claude.read().await;
+            match manager.stop_session(session_id).await {
+                Ok(()) => format!("Stopped session: {}", session_id),
+                Err(e) => format!("Error stopping session: {}", e),
+            }
+        }
+        Some("ask") => {
+            // Collect all remaining text as the question
+            if parts.len() < 2 {
+                return "Usage: /claude ask <question>".to_string();
+            }
+            let question = parts[1..].join(" ");
+            let manager = claude.read().await;
+            match manager.ask(&question).await {
+                Ok(response) => {
+                    // Truncate if too long for Telegram
+                    let max_len = 4000;
+                    if response.len() > max_len {
+                        format!("{}...\n\n(truncated)", &response[..max_len])
+                    } else {
+                        response
+                    }
+                }
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        _ => "Usage: /claude [status|list|new <workspace>|stop <id>|ask <question>]".to_string(),
+    }
+}
+
+async fn format_claude_status(claude: &Arc<RwLock<ClaudeManager>>) -> String {
+    let manager = claude.read().await;
+    let status = manager.status().await;
+
+    let mut lines = vec!["Claude Status:".to_string()];
+    lines.push(format!(
+        "  API Key: {}",
+        if status.api_key_configured { "configured" } else { "not configured" }
+    ));
+    lines.push(format!(
+        "  Sessions: {}/{}",
+        status.active_sessions, status.max_sessions
+    ));
+    lines.push(format!("  Workspace: {}", status.workspace_dir));
+
+    lines.join("\n")
+}
+
+async fn format_claude_sessions(claude: &Arc<RwLock<ClaudeManager>>) -> String {
+    let manager = claude.read().await;
+    let sessions = manager.list_sessions().await;
+
+    if sessions.is_empty() {
+        return "No Claude Code sessions.".to_string();
+    }
+
+    let mut lines = vec!["Claude Sessions:".to_string()];
+    for session in sessions {
+        lines.push(format!("  {}", format_session(&session)));
+    }
+
+    lines.join("\n")
 }
 
 #[cfg(test)]
