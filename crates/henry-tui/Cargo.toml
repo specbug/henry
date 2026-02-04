@@ -1,0 +1,16 @@
+[package]
+name = "henry-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+henry-health = { workspace = true }
+henry-config = { workspace = true }
+chrono = { workspace = true }

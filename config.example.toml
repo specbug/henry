@@ -1,0 +1,73 @@
+# Henry Configuration
+# See https://github.com/rishitv/henry for documentation
+#
+# Secret references use 1Password CLI format:
+#   op://vault/item/field
+#
+
+[daemon]
+# Data directory for runtime files
+data_dir = "~/.henry"
+# PID file location
+pid_file = "~/.henry/henry.pid"
+# Lock port for single-instance detection
+lock_port = 18790
+
+[network]
+# Address to bind services to ("0.0.0.0" for all interfaces)
+bind_address = "0.0.0.0"
+# Optional: your static LAN IP for documentation/healthchecks
+# static_ip = "192.168.1.100"
+
+[network.tailscale]
+enabled = false
+hostname = "henry"
+serve_https = true
+
+[telegram]
+enabled = false
+# 1Password reference for bot token
+token_ref = "op://Private/Henry Telegram Bot/credential"
+# Allowed Telegram user IDs (get yours from @userinfobot)
+allowed_users = []
+# Alternatively, allow by username
+allowed_usernames = []
+
+[http]
+enabled = true
+port = 18791
+# Optional: require API token for authentication
+# token_ref = "op://Private/Henry API/token"
+
+[containers]
+enabled = true
+# Use Podman (recommended) instead of Docker
+use_podman = true
+# Optional: explicit socket path (auto-detected if not set)
+# socket_path = "/run/user/501/podman/podman.sock"
+
+[media]
+enabled = false
+# Media library paths to manage
+library_paths = []
+# Jellyfin container name
+jellyfin_container = "jellyfin"
+# Enable hardware transcoding (VideoToolbox on macOS)
+hw_transcode = true
+
+[claude]
+enabled = false
+# 1Password reference for Anthropic API key
+api_key_ref = "op://Private/Anthropic API/credential"
+# Maximum concurrent Claude Code sessions
+max_sessions = 4
+# Workspace directory for Claude sessions
+workspace_dir = "~/claude-workspaces"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+# Log directory
+dir = "~/.henry/logs"
+# Enable JSON logging for machine parsing
+json = false

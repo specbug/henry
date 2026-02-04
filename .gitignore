@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local configuration (use config.example.toml as template)
+config.toml
+
+# Runtime files
+*.pid
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets (never commit)
+.env
+*.pem
+*.key
+credentials.json

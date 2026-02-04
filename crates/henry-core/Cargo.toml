@@ -1,0 +1,29 @@
+[package]
+name = "henry-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "henry"
+path = "src/main.rs"
+
+[dependencies]
+henry-config = { workspace = true }
+henry-lock = { workspace = true }
+henry-secrets = { workspace = true }
+henry-state = { workspace = true }
+henry-tui = { workspace = true }
+henry-health = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }

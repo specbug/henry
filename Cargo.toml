@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/henry-core",
+    "crates/henry-config",
+    "crates/henry-lock",
+    "crates/henry-secrets",
+    "crates/henry-state",
+    "crates/henry-tui",
+    "crates/henry-health",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Rishit Vora"]
+license = "MIT"
+repository = "https://github.com/rishitv/henry"
+
+[workspace.dependencies]
+# Core
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+
+# Database
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+
+# Security
+subtle = "2"
+
+# UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async utilities
+tokio-util = "0.7"
+futures = "0.3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# File watching
+notify = "7"
+
+# Workspace crates
+henry-core = { path = "crates/henry-core" }
+henry-config = { path = "crates/henry-config" }
+henry-lock = { path = "crates/henry-lock" }
+henry-secrets = { path = "crates/henry-secrets" }
+henry-state = { path = "crates/henry-state" }
+henry-tui = { path = "crates/henry-tui" }
+henry-health = { path = "crates/henry-health" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
