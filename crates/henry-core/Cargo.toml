@@ -16,6 +16,8 @@ henry-secrets = { workspace = true }
 henry-state = { workspace = true }
 henry-tui = { workspace = true }
 henry-health = { workspace = true }
+henry-telegram = { workspace = true }
+henry-http = { workspace = true }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

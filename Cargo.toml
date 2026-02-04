@@ -8,6 +8,8 @@ members = [
     "crates/henry-state",
     "crates/henry-tui",
     "crates/henry-health",
+    "crates/henry-telegram",
+    "crates/henry-http",
 ]
 
 [workspace.package]
@@ -33,6 +35,15 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 # Security
 subtle = "2"
 
+# Telegram
+teloxide = { version = "0.13", features = ["macros"] }
+
+# HTTP
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+http = "1"
+
 # UI
 ratatui = "0.29"
 crossterm = "0.28"
@@ -55,6 +66,8 @@ henry-secrets = { path = "crates/henry-secrets" }
 henry-state = { path = "crates/henry-state" }
 henry-tui = { path = "crates/henry-tui" }
 henry-health = { path = "crates/henry-health" }
+henry-telegram = { path = "crates/henry-telegram" }
+henry-http = { path = "crates/henry-http" }
 
 [profile.release]
 lto = true

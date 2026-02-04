@@ -3,12 +3,14 @@
 use henry_config::Config;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
+use henry_secrets::SecretManager;
 use henry_state::StateManager;
 use henry_tui::{ui, App, Event, EventHandler, Terminal};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use crate::signals::SignalHandler;
@@ -27,6 +29,15 @@ pub enum DaemonError {
     #[error("TUI error: {0}")]
     Tui(#[from] henry_tui::TuiError),
 
+    #[error("secrets error: {0}")]
+    Secrets(#[from] henry_secrets::SecretsError),
+
+    #[error("telegram error: {0}")]
+    Telegram(#[from] henry_telegram::TelegramError),
+
+    #[error("http error: {0}")]
+    Http(#[from] henry_http::HttpError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -37,7 +48,9 @@ pub struct Daemon {
     config_path: PathBuf,
     _lock: InstanceLock,
     state: StateManager,
-    health: HealthManager,
+    health: Arc<RwLock<HealthManager>>,
+    secrets: SecretManager,
+    shutdown_tx: broadcast::Sender<()>,
 }
 
 impl Daemon {
@@ -72,7 +85,13 @@ impl Daemon {
         let state = StateManager::new(&db_path).await?;
 
         // Initialize health manager
-        let health = HealthManager::new(env!("CARGO_PKG_VERSION"));
+        let health = Arc::new(RwLock::new(HealthManager::new(env!("CARGO_PKG_VERSION"))));
+
+        // Initialize secrets manager
+        let secrets = SecretManager::new();
+
+        // Create shutdown broadcast channel
+        let (shutdown_tx, _) = broadcast::channel(1);
 
         Ok(Self {
             config,
@@ -80,6 +99,8 @@ impl Daemon {
             _lock: lock,
             state,
             health,
+            secrets,
+            shutdown_tx,
         })
     }
 
@@ -88,8 +109,17 @@ impl Daemon {
         // Initialize terminal
         let mut terminal = Terminal::new()?;
 
+        // Extract health manager for TUI (TUI mode doesn't need shared access)
+        let health = Arc::try_unwrap(self.health)
+            .map(|rw| rw.into_inner())
+            .unwrap_or_else(|arc| {
+                // This shouldn't happen since we haven't shared it yet
+                let guard = arc.blocking_read();
+                HealthManager::new(guard.version())
+            });
+
         // Create app state with health manager
-        let mut app = App::new(env!("CARGO_PKG_VERSION")).with_health_manager(self.health);
+        let mut app = App::new(env!("CARGO_PKG_VERSION")).with_health_manager(health);
 
         // Register modules
         Self::register_modules(&self.config, &mut app).await;
@@ -167,12 +197,12 @@ impl Daemon {
         info!("Starting Henry daemon in headless mode");
 
         // Set up signal handler
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+        let (signal_shutdown_tx, mut signal_shutdown_rx) = mpsc::channel::<()>(1);
         let (reload_tx, mut reload_rx) = mpsc::channel::<()>(1);
 
         #[cfg(unix)]
         {
-            let signal_handler = SignalHandler::new(shutdown_tx, reload_tx);
+            let signal_handler = SignalHandler::new(signal_shutdown_tx, reload_tx);
             tokio::spawn(async move {
                 signal_handler.run().await;
             });
@@ -181,6 +211,9 @@ impl Daemon {
         // Register modules
         self.register_modules_headless().await;
 
+        // Start communication services
+        self.start_services().await?;
+
         // Main loop
         let mut interval = tokio::time::interval(Duration::from_secs(10));
 
@@ -188,13 +221,16 @@ impl Daemon {
             tokio::select! {
                 _ = interval.tick() => {
                     // Periodic health check
-                    let snapshot = self.health.get_snapshot().await;
+                    let mut health = self.health.write().await;
+                    let snapshot = health.get_snapshot().await;
                     if snapshot.overall_status != HealthStatus::Healthy {
                         warn!("System health: {:?}", snapshot.overall_status);
                     }
                 }
-                Some(_) = shutdown_rx.recv() => {
+                Some(_) = signal_shutdown_rx.recv() => {
                     info!("Shutdown signal received");
+                    // Broadcast shutdown to all services
+                    let _ = self.shutdown_tx.send(());
                     break;
                 }
                 Some(_) = reload_rx.recv() => {
@@ -213,6 +249,87 @@ impl Daemon {
         }
 
         info!("Henry daemon stopped");
+        Ok(())
+    }
+
+    /// Start communication services (Telegram, HTTP).
+    async fn start_services(&mut self) -> Result<(), DaemonError> {
+        // Start HTTP server if enabled
+        if self.config.http.enabled {
+            let http_config = self.config.http.clone();
+            let bind_addr = self.config.network.bind_address.clone();
+            let health = self.health.clone();
+            let shutdown_rx = self.shutdown_tx.subscribe();
+
+            // Resolve API token if configured
+            let api_token = if let Some(ref token_ref) = http_config.token_ref {
+                match self.secrets.get(token_ref).await {
+                    Ok(token) => Some(token),
+                    Err(e) => {
+                        warn!("Failed to get HTTP API token: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) =
+                    henry_http::run_server(http_config, &bind_addr, health, api_token, shutdown_rx)
+                        .await
+                {
+                    error!("HTTP server error: {}", e);
+                }
+            });
+
+            self.health
+                .write()
+                .await
+                .update_module(ModuleHealth::new("http").healthy())
+                .await;
+            info!("HTTP server started on port {}", self.config.http.port);
+        }
+
+        // Start Telegram bot if enabled
+        if self.config.telegram.enabled {
+            let telegram_config = self.config.telegram.clone();
+            let health = self.health.clone();
+            let shutdown_rx = self.shutdown_tx.subscribe();
+
+            // Get bot token from 1Password
+            let token = match self.secrets.get(&telegram_config.token_ref).await {
+                Ok(token) => token,
+                Err(e) => {
+                    error!("Failed to get Telegram bot token: {}", e);
+                    self.health
+                        .write()
+                        .await
+                        .update_module(
+                            ModuleHealth::new("telegram")
+                                .unhealthy(format!("Failed to get token: {}", e)),
+                        )
+                        .await;
+                    return Ok(());
+                }
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) =
+                    henry_telegram::run_bot(token, telegram_config, health, shutdown_rx).await
+                {
+                    error!("Telegram bot error: {}", e);
+                }
+            });
+
+            self.health
+                .write()
+                .await
+                .update_module(ModuleHealth::new("telegram").healthy())
+                .await;
+            info!("Telegram bot started");
+        }
+
         Ok(())
     }
 
@@ -249,10 +366,11 @@ impl Daemon {
             ("http", self.config.http.enabled),
         ];
 
+        let health = self.health.read().await;
         for (name, enabled) in modules {
-            self.health.register_module(name, enabled).await;
+            health.register_module(name, enabled).await;
             if enabled {
-                self.health
+                health
                     .update_module(ModuleHealth::new(name).healthy())
                     .await;
             }
@@ -275,7 +393,7 @@ impl Daemon {
     }
 
     /// Get the health manager.
-    pub fn health(&self) -> &HealthManager {
+    pub fn health(&self) -> &Arc<RwLock<HealthManager>> {
         &self.health
     }
 }

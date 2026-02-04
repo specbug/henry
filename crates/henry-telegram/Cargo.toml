@@ -1,0 +1,28 @@
+[package]
+name = "henry-telegram"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Telegram bot integration for Henry daemon"
+
+[dependencies]
+# Workspace dependencies
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+subtle.workspace = true
+chrono.workspace = true
+
+# Telegram
+teloxide.workspace = true
+
+# Internal crates
+henry-config.workspace = true
+henry-health.workspace = true
+henry-secrets.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

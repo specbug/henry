@@ -144,62 +144,57 @@ api_key_ref = "op://Private/Anthropic API/credential"
 
 ---
 
-## Phase 2: Communication (NEXT)
+## Phase 2: Communication (COMPLETE)
 
-### New Crates to Create
+**Completed:** 2026-02-04
 
-#### `henry-telegram`
-- Teloxide bot with allowlist authentication
-- Commands: `/status`, `/containers`, `/logs`, `/restart`
-- User ID/username allowlist from config
-- Timing-safe token comparison
+### Implemented Crates
 
-#### `henry-http`
-- Axum REST API + WebSocket
-- Endpoints: `/health`, `/status`, `/modules`, `/containers`
-- Optional API token authentication
-- CORS for local network access
+| Crate | Purpose | Key Features |
+|-------|---------|--------------|
+| `henry-telegram` | Telegram bot | Teloxide, allowlist auth, /status /modules /metrics commands |
+| `henry-http` | HTTP API | Axum REST API, /health /status /modules /metrics /snapshot endpoints, CORS, optional token auth |
 
-### Dependencies to Add
+### Commands
 
-```toml
-# Workspace Cargo.toml
-teloxide = { version = "0.13", features = ["macros"] }
-axum = "0.7"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-```
+**Telegram Bot:**
+- `/start` - Start the bot
+- `/help` - Show available commands
+- `/status` - Show system status
+- `/modules` - Show module health
+- `/metrics` - Show system metrics
 
-### Config Additions
+**HTTP API Endpoints:**
+- `GET /` - API info
+- `GET /health` - Health check (no auth required)
+- `GET /api/status` - System status
+- `GET /api/modules` - Module health
+- `GET /api/metrics` - System metrics
+- `GET /api/snapshot` - Full health snapshot
 
-```toml
-[telegram]
-enabled = true
-token_ref = "op://Private/Henry Telegram Bot/credential"
-allowed_users = [123456789]  # Your Telegram user ID
-allowed_usernames = ["your_username"]
+### Security Features
 
-[http]
-enabled = true
-port = 18791
-token_ref = "op://Private/Henry API/token"  # Optional
-```
-
-### Key Implementation Notes
-
-1. **Telegram allowlist auth** (from OpenClaw patterns):
+1. **Telegram allowlist auth**:
    - Check user ID first (faster)
    - Fall back to username check
-   - Use `subtle::ConstantTimeEq` for token comparison
+   - Timing-safe string comparison via `subtle::ConstantTimeEq`
 
 2. **HTTP API security**:
-   - Bind to `0.0.0.0` but require token for non-local requests
-   - SSRF prevention for any outbound requests
-   - Rate limiting via tower middleware
+   - Bind to `0.0.0.0` with optional token for non-local requests
+   - Bearer token authentication with timing-safe comparison
+   - CORS enabled for local network access
+   - Skip auth for localhost/192.168.x/10.x requests
 
-3. **Message bus pattern**:
-   - Tokio MPSC channels between interfaces and modules
-   - Common message types for commands/responses
+3. **Daemon integration**:
+   - Services start in headless mode via `tokio::spawn`
+   - Shared health manager via `Arc<RwLock<HealthManager>>`
+   - Graceful shutdown via `broadcast::channel`
+
+### Tests
+
+10 new unit tests (25 total):
+- `henry-telegram`: 6 tests (auth allowlists, token verification, commands)
+- `henry-http`: 4 tests (health endpoint, root endpoint, token verification, local IP detection)
 
 ---
 
