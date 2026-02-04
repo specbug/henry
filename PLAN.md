@@ -212,6 +212,8 @@ crates/henry-core/src/
 
 ### Code Patterns
 
+> **Note:** These signatures were updated in Phase 3 to include `containers` parameter. See Phase 3 for current signatures.
+
 **Service spawning pattern** (in `daemon.rs`):
 ```rust
 // Shared state
@@ -221,32 +223,11 @@ let (shutdown_tx, _) = broadcast::channel(1);
 // Spawn service with shutdown receiver
 let shutdown_rx = shutdown_tx.subscribe();
 tokio::spawn(async move {
-    henry_http::run_server(config, &bind_addr, health, api_token, shutdown_rx).await
+    henry_http::run_server(..., shutdown_rx).await
 });
 
 // On shutdown signal:
 let _ = shutdown_tx.send(());
-```
-
-**Telegram bot pattern** (in `henry-telegram/src/lib.rs`):
-```rust
-pub async fn run_bot(
-    token: String,
-    config: TelegramConfig,
-    health: Arc<RwLock<HealthManager>>,
-    mut shutdown: broadcast::Receiver<()>,
-) -> Result<(), TelegramError>
-```
-
-**HTTP server pattern** (in `henry-http/src/lib.rs`):
-```rust
-pub async fn run_server(
-    config: HttpConfig,
-    bind_addr: &str,
-    health: Arc<RwLock<HealthManager>>,
-    api_token: Option<String>,
-    mut shutdown: broadcast::Receiver<()>,
-) -> Result<(), HttpError>
 ```
 
 ### Tests
@@ -263,6 +244,7 @@ pub async fn run_server(
 
 ## Phase 3: Containers (COMPLETE)
 
+**Commit:** `283ef05b5` on branch `init`
 **Completed:** 2026-02-04
 
 ### Implemented Crate: `henry-server`
@@ -325,9 +307,51 @@ allowed_containers = []  # Empty = all allowed
 10 new unit tests (35 total):
 - `henry-server`: 10 tests (container status parsing, allowlist filtering, secret detection, socket detection)
 
+### Code Patterns (Updated)
+
+**Service signatures now include containers** (in `daemon.rs`):
+```rust
+// Shared container manager
+let containers: Option<Arc<RwLock<ContainerManager>>> = if config.containers.enabled {
+    ContainerManager::new(config.containers.clone()).await.ok()
+        .map(|m| Arc::new(RwLock::new(m)))
+} else { None };
+
+// Pass to services
+henry_http::run_server(config, &bind_addr, health, api_token, containers.clone(), shutdown_rx)
+henry_telegram::run_bot(token, config, health, containers.clone(), shutdown_rx)
+```
+
+**HTTP server signature**:
+```rust
+pub async fn run_server(
+    config: HttpConfig,
+    bind_addr: &str,
+    health: Arc<RwLock<HealthManager>>,
+    api_token: Option<String>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), HttpError>
+```
+
+**Telegram bot signature**:
+```rust
+pub async fn run_bot(
+    token: String,
+    config: TelegramConfig,
+    health: Arc<RwLock<HealthManager>>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), TelegramError>
+```
+
+### Binary
+
+- Size: 10MB (release, LTO, stripped) - up from 9MB due to bollard
+
 ---
 
-## Phase 4: Media
+## Phase 4: Media (NEXT)
 
 ### `henry-media`
 - Jellyfin container management
