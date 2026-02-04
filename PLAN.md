@@ -146,6 +146,7 @@ api_key_ref = "op://Private/Anthropic API/credential"
 
 ## Phase 2: Communication (COMPLETE)
 
+**Commit:** `177c1034f` on branch `init`
 **Completed:** 2026-02-04
 
 ### Implemented Crates
@@ -154,6 +155,25 @@ api_key_ref = "op://Private/Anthropic API/credential"
 |-------|---------|--------------|
 | `henry-telegram` | Telegram bot | Teloxide, allowlist auth, /status /modules /metrics commands |
 | `henry-http` | HTTP API | Axum REST API, /health /status /modules /metrics /snapshot endpoints, CORS, optional token auth |
+
+### Key Files
+
+```
+crates/henry-telegram/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # Bot setup, command handlers, run_bot()
+    └── auth.rs         # is_authorized(), timing-safe comparison
+
+crates/henry-http/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # Router, handlers, run_server()
+    └── auth.rs         # auth_middleware(), Bearer token validation
+
+crates/henry-core/src/
+└── daemon.rs           # start_services() spawns Telegram + HTTP
+```
 
 ### Commands
 
@@ -190,27 +210,151 @@ api_key_ref = "op://Private/Anthropic API/credential"
    - Shared health manager via `Arc<RwLock<HealthManager>>`
    - Graceful shutdown via `broadcast::channel`
 
+### Code Patterns
+
+**Service spawning pattern** (in `daemon.rs`):
+```rust
+// Shared state
+let health: Arc<RwLock<HealthManager>> = ...;
+let (shutdown_tx, _) = broadcast::channel(1);
+
+// Spawn service with shutdown receiver
+let shutdown_rx = shutdown_tx.subscribe();
+tokio::spawn(async move {
+    henry_http::run_server(config, &bind_addr, health, api_token, shutdown_rx).await
+});
+
+// On shutdown signal:
+let _ = shutdown_tx.send(());
+```
+
+**Telegram bot pattern** (in `henry-telegram/src/lib.rs`):
+```rust
+pub async fn run_bot(
+    token: String,
+    config: TelegramConfig,
+    health: Arc<RwLock<HealthManager>>,
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), TelegramError>
+```
+
+**HTTP server pattern** (in `henry-http/src/lib.rs`):
+```rust
+pub async fn run_server(
+    config: HttpConfig,
+    bind_addr: &str,
+    health: Arc<RwLock<HealthManager>>,
+    api_token: Option<String>,
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), HttpError>
+```
+
 ### Tests
 
 10 new unit tests (25 total):
 - `henry-telegram`: 6 tests (auth allowlists, token verification, commands)
 - `henry-http`: 4 tests (health endpoint, root endpoint, token verification, local IP detection)
 
+### Binary
+
+- Size: 9.0MB (release, LTO, stripped) - up from 4.8MB due to Telegram/HTTP deps
+
 ---
 
-## Phase 3: Containers
+## Phase 3: Containers (NEXT)
 
-### `henry-server`
-- Podman integration via `bollard` crate
-- Container lifecycle: start, stop, restart, logs
-- Compose file support
-- Tailscale serve exposure
+### Create `henry-server` Crate
 
-### Commands
-- `/containers list` - Show running containers
-- `/container start <name>` - Start container
-- `/container stop <name>` - Stop container
-- `/container logs <name>` - Get recent logs
+**Purpose:** Podman/Docker container management
+
+### Dependencies to Add
+
+```toml
+# Workspace Cargo.toml
+bollard = "0.18"  # Docker/Podman API client
+```
+
+### Directory Structure
+
+```
+crates/henry-server/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # ContainerManager, run_container_service()
+    ├── podman.rs       # Podman-specific socket detection
+    └── types.rs        # ContainerInfo, ContainerStatus enums
+```
+
+### Key Features
+
+1. **Container lifecycle**: start, stop, restart, logs, inspect
+2. **Podman socket detection**: `$XDG_RUNTIME_DIR/podman/podman.sock` or `/run/user/$UID/podman/podman.sock`
+3. **List containers** with status, image, ports, uptime
+4. **Tail logs** with optional follow mode
+5. **Health integration**: Update module health based on container states
+
+### Config Additions
+
+```toml
+[containers]
+enabled = true
+use_podman = true
+socket_path = ""  # Auto-detect if empty
+# Allowlist of containers Henry can manage (empty = all)
+allowed_containers = []
+```
+
+### API Pattern
+
+```rust
+pub struct ContainerManager {
+    docker: Docker,  // bollard client (works with Podman too)
+    config: ContainerConfig,
+}
+
+impl ContainerManager {
+    pub async fn new(config: ContainerConfig) -> Result<Self, ContainerError>;
+    pub async fn list(&self) -> Result<Vec<ContainerInfo>, ContainerError>;
+    pub async fn start(&self, name: &str) -> Result<(), ContainerError>;
+    pub async fn stop(&self, name: &str) -> Result<(), ContainerError>;
+    pub async fn restart(&self, name: &str) -> Result<(), ContainerError>;
+    pub async fn logs(&self, name: &str, tail: usize) -> Result<String, ContainerError>;
+    pub async fn inspect(&self, name: &str) -> Result<ContainerDetail, ContainerError>;
+}
+```
+
+### Commands to Add
+
+**Telegram:**
+- `/containers` - List all containers with status
+- `/container start <name>` - Start a container
+- `/container stop <name>` - Stop a container
+- `/container restart <name>` - Restart a container
+- `/container logs <name>` - Get last 50 lines of logs
+
+**HTTP API:**
+- `GET /api/containers` - List containers
+- `POST /api/containers/{name}/start` - Start container
+- `POST /api/containers/{name}/stop` - Stop container
+- `POST /api/containers/{name}/restart` - Restart container
+- `GET /api/containers/{name}/logs?tail=50` - Get logs
+
+### Integration Steps
+
+1. Create `henry-server` crate with bollard
+2. Add socket auto-detection for Podman on macOS
+3. Implement ContainerManager with list/start/stop/restart/logs
+4. Add container commands to `henry-telegram`
+5. Add container endpoints to `henry-http`
+6. Wire into daemon with health updates
+7. Add tests for container operations (mock Docker API)
+
+### Podman on macOS Notes
+
+- Socket typically at: `/var/run/docker.sock` (if podman-mac-helper installed)
+- Or: `$HOME/.local/share/containers/podman/machine/podman.sock`
+- Use `podman machine inspect` to find socket path
+- bollard works with Podman API (Docker-compatible)
 
 ---
 
