@@ -30,6 +30,8 @@ pub struct Config {
     pub media: MediaConfig,
     /// Claude/AI integration settings.
     pub claude: ClaudeConfig,
+    /// Maintenance settings.
+    pub maint: MaintConfig,
     /// Logging settings.
     pub logging: LoggingConfig,
 }
@@ -44,6 +46,7 @@ impl Default for Config {
             containers: ContainerConfig::default(),
             media: MediaConfig::default(),
             claude: ClaudeConfig::default(),
+            maint: MaintConfig::default(),
             logging: LoggingConfig::default(),
         }
     }
@@ -247,6 +250,61 @@ impl Default for LoggingConfig {
             level: "info".to_string(),
             dir: home.join(".henry").join("logs"),
             json: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MaintConfig {
+    pub enabled: bool,
+    /// Enable automated backups.
+    pub backup_enabled: bool,
+    /// Backup cron schedule (default: 3 AM daily).
+    pub backup_cron: String,
+    /// Backup directory.
+    pub backup_dir: PathBuf,
+    /// Maximum number of backups to retain.
+    pub max_backups: usize,
+    /// Enable log rotation.
+    pub log_rotation_enabled: bool,
+    /// Log rotation cron schedule (default: midnight daily).
+    pub log_rotation_cron: String,
+    /// Log directory for rotation.
+    pub log_dir: PathBuf,
+    /// Maximum number of rotated log files.
+    pub max_log_files: usize,
+    /// Maximum log file size before rotation (bytes).
+    pub max_log_size: u64,
+    /// Enable update checking.
+    pub update_check_enabled: bool,
+    /// Update check cron schedule (default: noon daily).
+    pub update_check_cron: String,
+    /// GitHub repository for update checks (owner/repo).
+    pub github_repo: Option<String>,
+    /// Data directory (for backup sources).
+    pub data_dir: PathBuf,
+}
+
+impl Default for MaintConfig {
+    fn default() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let data_dir = home.join(".henry");
+        Self {
+            enabled: true,
+            backup_enabled: true,
+            backup_cron: "0 0 3 * * *".to_string(), // 3 AM daily
+            backup_dir: data_dir.join("backups"),
+            max_backups: 7,
+            log_rotation_enabled: true,
+            log_rotation_cron: "0 0 0 * * *".to_string(), // Midnight daily
+            log_dir: data_dir.join("logs"),
+            max_log_files: 10,
+            max_log_size: 10 * 1024 * 1024, // 10 MB
+            update_check_enabled: true,
+            update_check_cron: "0 0 12 * * *".to_string(), // Noon daily
+            github_repo: Some("specbug/henry".to_string()),
+            data_dir,
         }
     }
 }

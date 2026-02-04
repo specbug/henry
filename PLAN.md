@@ -581,13 +581,132 @@ pub async fn run_bot(
 
 ---
 
-## Phase 6: Self-Maintenance
+## Phase 6: Self-Maintenance (COMPLETE)
 
-### `henry-maint`
-- Cron scheduler (`tokio-cron-scheduler`)
-- Automated backups
-- Log rotation
-- Self-update checks
+**Commit:** `e09d1de47` on branch `init`
+**Completed:** 2026-02-05
+
+### Implemented Crate: `henry-maint`
+
+**Purpose:** Automated maintenance tasks: backups, log rotation, update checking
+
+### Directory Structure
+
+```
+crates/henry-maint/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # MaintenanceManager, MaintError, public API
+    ├── backup.rs       # BackupManager, tar.gz archive creation
+    ├── logs.rs         # LogRotator, log file rotation with compression
+    ├── scheduler.rs    # MaintScheduler, cron-based job scheduling
+    ├── update.rs       # UpdateChecker, GitHub release checking
+    └── types.rs        # MaintStatus, BackupInfo, ScheduledJob, UpdateInfo
+```
+
+### Key Features
+
+1. **Cron scheduler**: `tokio-cron-scheduler` for automated tasks
+2. **Automated backups**: Compress state DB and config to tar.gz archives
+3. **Log rotation**: Rotate and compress logs that exceed size threshold
+4. **Update checking**: Check GitHub releases for newer versions
+5. **Configurable retention**: Max backups and max log files settings
+
+### Config
+
+```toml
+[maint]
+enabled = true
+backup_enabled = true
+backup_cron = "0 0 3 * * *"         # 3 AM daily
+backup_dir = "~/.henry/backups"
+max_backups = 7
+log_rotation_enabled = true
+log_rotation_cron = "0 0 0 * * *"   # Midnight daily
+log_dir = "~/.henry/logs"
+max_log_files = 10
+max_log_size = 10485760             # 10 MB
+update_check_enabled = true
+update_check_cron = "0 0 12 * * *"  # Noon daily
+github_repo = "specbug/henry"
+```
+
+### Telegram Commands
+
+- `/maint` or `/maint status` - Show maintenance module status
+- `/maint backup` - Create a backup now
+- `/maint backups` - List existing backups
+- `/maint jobs` - Show scheduled jobs
+- `/maint rotate` - Rotate logs now
+- `/maint update` - Check for updates
+
+### HTTP API Endpoints
+
+- `GET /api/maint/status` - Full maintenance module status
+- `GET /api/maint/backups` - List all backups
+- `POST /api/maint/backups/create` - Create backup now
+- `DELETE /api/maint/backups/{name}` - Delete a backup
+- `GET /api/maint/jobs` - List scheduled jobs
+- `POST /api/maint/rotate` - Trigger log rotation
+- `POST /api/maint/update-check` - Check for updates
+
+### Tests
+
+23 new unit tests (95 total):
+- `henry-maint` types: 4 tests (status, job types, serialization)
+- `henry-maint` backup: 5 tests (create, list, cleanup, format size)
+- `henry-maint` logs: 4 tests (rotation, find files, total size)
+- `henry-maint` scheduler: 4 tests (creation, add/remove jobs)
+- `henry-maint` update: 5 tests (version comparison, checker)
+- `henry-maint` lib: 1 test (format_job)
+
+### Binary
+
+- Size: 13MB (release, LTO, stripped) - up from 12MB due to tar/flate2/cron deps
+
+### Code Patterns (Updated)
+
+**Service signatures now include maint** (in `daemon.rs`):
+```rust
+// Shared maintenance manager
+let maint: Option<Arc<RwLock<MaintenanceManager>>> = if config.maint.enabled {
+    let manager = MaintenanceManager::new(config.maint.clone());
+    Some(Arc::new(RwLock::new(manager)))
+} else { None };
+
+// Pass to services
+henry_http::run_server(config, &bind_addr, health, api_token, containers, media, claude, maint, shutdown_rx)
+henry_telegram::run_bot(token, config, health, containers, media, claude, maint, shutdown_rx)
+```
+
+**HTTP server signature**:
+```rust
+pub async fn run_server(
+    config: HttpConfig,
+    bind_addr: &str,
+    health: Arc<RwLock<HealthManager>>,
+    api_token: Option<String>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,
+    maint: Option<Arc<RwLock<MaintenanceManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), HttpError>
+```
+
+**Telegram bot signature**:
+```rust
+pub async fn run_bot(
+    token: String,
+    config: TelegramConfig,
+    health: Arc<RwLock<HealthManager>>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,
+    maint: Option<Arc<RwLock<MaintenanceManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), TelegramError>
+```
 
 ---
 

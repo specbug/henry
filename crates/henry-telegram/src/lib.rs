@@ -5,6 +5,7 @@
 use henry_claude::{format_session, ClaudeManager};
 use henry_config::TelegramConfig;
 use henry_health::{format_bytes, format_duration, HealthManager, HealthStatus};
+use henry_maint::{format_backup_size, format_job, MaintenanceManager};
 use henry_media::{format_ticks, MediaManager};
 use henry_server::ContainerManager;
 use std::sync::Arc;
@@ -52,6 +53,8 @@ pub enum Command {
     Media(String),
     #[command(description = "claude session management: new|list|stop|ask")]
     Claude(String),
+    #[command(description = "maintenance: status|backup|jobs|update")]
+    Maint(String),
     #[command(description = "start the bot")]
     Start,
 }
@@ -63,6 +66,7 @@ pub struct BotState {
     pub containers: Option<Arc<RwLock<ContainerManager>>>,
     pub media: Option<Arc<RwLock<MediaManager>>>,
     pub claude: Option<Arc<RwLock<ClaudeManager>>>,
+    pub maint: Option<Arc<RwLock<MaintenanceManager>>>,
 }
 
 /// Create and run the Telegram bot.
@@ -73,6 +77,7 @@ pub async fn run_bot(
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
+    maint: Option<Arc<RwLock<MaintenanceManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), TelegramError> {
     if token.is_empty() {
@@ -86,6 +91,7 @@ pub async fn run_bot(
         containers,
         media,
         claude,
+        maint,
     });
 
     info!("Starting Telegram bot");
@@ -171,6 +177,7 @@ async fn handle_command(
         Command::Container(args) => handle_container_command(&state, &args).await,
         Command::Media(args) => handle_media_command(&state, &args).await,
         Command::Claude(args) => handle_claude_command(&state, &args).await,
+        Command::Maint(args) => handle_maint_command(&state, &args).await,
     };
 
     bot.send_message(msg.chat.id, response).await?;
@@ -600,6 +607,144 @@ async fn format_claude_sessions(claude: &Arc<RwLock<ClaudeManager>>) -> String {
     let mut lines = vec!["Claude Sessions:".to_string()];
     for session in sessions {
         lines.push(format!("  {}", format_session(&session)));
+    }
+
+    lines.join("\n")
+}
+
+async fn handle_maint_command(state: &BotState, args: &str) -> String {
+    let Some(ref maint) = state.maint else {
+        return "Maintenance module not enabled.".to_string();
+    };
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let action = parts.first().map(|s| s.to_lowercase());
+
+    match action.as_deref() {
+        None | Some("status") => format_maint_status(maint).await,
+        Some("backup") => {
+            let mut manager = maint.write().await;
+            match manager.backup_now().await {
+                Ok(backup) => format!(
+                    "Backup created:\n  Name: {}\n  Size: {}",
+                    backup.name,
+                    format_backup_size(backup.size)
+                ),
+                Err(e) => format!("Error creating backup: {}", e),
+            }
+        }
+        Some("backups") | Some("list") => format_maint_backups(maint).await,
+        Some("jobs") | Some("schedule") => format_maint_jobs(maint).await,
+        Some("rotate") => {
+            let mut manager = maint.write().await;
+            match manager.rotate_logs_now().await {
+                Ok(result) => format!(
+                    "Log rotation complete:\n  Rotated: {} files\n  Deleted: {} old files\n  Processed: {} bytes",
+                    result.files_rotated,
+                    result.files_deleted,
+                    format_backup_size(result.bytes_processed)
+                ),
+                Err(e) => format!("Error rotating logs: {}", e),
+            }
+        }
+        Some("update") | Some("check") => {
+            let mut manager = maint.write().await;
+            match manager.check_updates_now().await {
+                Ok(info) => {
+                    if info.update_available {
+                        format!(
+                            "Update available!\n  Current: {}\n  Latest: {}\n  URL: {}",
+                            info.current_version,
+                            info.latest_version,
+                            info.release_url.unwrap_or_else(|| "N/A".to_string())
+                        )
+                    } else {
+                        format!("Already up to date (v{})", info.current_version)
+                    }
+                }
+                Err(e) => format!("Error checking updates: {}", e),
+            }
+        }
+        _ => "Usage: /maint [status|backup|backups|jobs|rotate|update]".to_string(),
+    }
+}
+
+async fn format_maint_status(maint: &Arc<RwLock<MaintenanceManager>>) -> String {
+    let manager = maint.read().await;
+    let status = manager.status().await;
+
+    let mut lines = vec!["Maintenance Status:".to_string()];
+    lines.push(format!("  Version: {}", status.current_version));
+    lines.push(format!("  Scheduled Jobs: {}", status.scheduled_jobs));
+
+    if let Some(ref update) = status.available_update {
+        lines.push(format!("  Update Available: {}", update));
+    }
+
+    lines.push(format!(
+        "  Last Backup: {}",
+        status
+            .last_backup
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".to_string())
+    ));
+
+    lines.push(format!(
+        "  Last Update Check: {}",
+        status
+            .last_update_check
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".to_string())
+    ));
+
+    lines.push(format!(
+        "  Backups: {} ({} total)",
+        status.backups_retained,
+        format_backup_size(status.total_backup_size)
+    ));
+
+    lines.join("\n")
+}
+
+async fn format_maint_backups(maint: &Arc<RwLock<MaintenanceManager>>) -> String {
+    let manager = maint.read().await;
+    match manager.list_backups() {
+        Ok(backups) => {
+            if backups.is_empty() {
+                return "No backups found.".to_string();
+            }
+
+            let mut lines = vec!["Backups:".to_string()];
+            for backup in backups.iter().take(10) {
+                lines.push(format!(
+                    "  {} ({}) - {}",
+                    backup.name,
+                    format_backup_size(backup.size),
+                    backup.created_at.format("%Y-%m-%d %H:%M")
+                ));
+            }
+
+            if backups.len() > 10 {
+                lines.push(format!("  ... and {} more", backups.len() - 10));
+            }
+
+            lines.join("\n")
+        }
+        Err(e) => format!("Error listing backups: {}", e),
+    }
+}
+
+async fn format_maint_jobs(maint: &Arc<RwLock<MaintenanceManager>>) -> String {
+    let manager = maint.read().await;
+    let jobs = manager.list_jobs().await;
+
+    if jobs.is_empty() {
+        return "No scheduled jobs.".to_string();
+    }
+
+    let mut lines = vec!["Scheduled Jobs:".to_string()];
+    for job in jobs {
+        lines.push(format!("  {}", format_job(&job)));
     }
 
     lines.join("\n")

@@ -70,6 +70,33 @@ max_sessions = 4
 # Workspace directory for Claude sessions
 workspace_dir = "~/claude-workspaces"
 
+[maint]
+enabled = true
+# Enable automated backups
+backup_enabled = true
+# Backup schedule (cron format: sec min hour day month day-of-week)
+backup_cron = "0 0 3 * * *"   # 3 AM daily
+# Backup directory
+backup_dir = "~/.henry/backups"
+# Maximum number of backups to retain
+max_backups = 7
+# Enable log rotation
+log_rotation_enabled = true
+# Log rotation schedule
+log_rotation_cron = "0 0 0 * * *"  # Midnight daily
+# Log directory for rotation
+log_dir = "~/.henry/logs"
+# Maximum rotated log files to keep
+max_log_files = 10
+# Maximum log file size before rotation (bytes)
+max_log_size = 10485760  # 10 MB
+# Enable update checking
+update_check_enabled = true
+# Update check schedule
+update_check_cron = "0 0 12 * * *"  # Noon daily
+# GitHub repository for update checks
+github_repo = "specbug/henry"
+
 [logging]
 # Log level: trace, debug, info, warn, error
 level = "info"

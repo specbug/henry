@@ -13,6 +13,7 @@ members = [
     "crates/henry-server",
     "crates/henry-media",
     "crates/henry-claude",
+    "crates/henry-maint",
 ]
 
 [workspace.package]
@@ -89,6 +90,10 @@ henry-http = { path = "crates/henry-http" }
 henry-server = { path = "crates/henry-server" }
 henry-media = { path = "crates/henry-media" }
 henry-claude = { path = "crates/henry-claude" }
+henry-maint = { path = "crates/henry-maint" }
+
+# Cron parsing
+cron = "0.15"
 
 [profile.release]
 lto = true

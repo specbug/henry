@@ -4,6 +4,7 @@ use henry_claude::ClaudeManager;
 use henry_config::Config;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
+use henry_maint::MaintenanceManager;
 use henry_media::MediaManager;
 use henry_secrets::SecretManager;
 use henry_server::ContainerManager;
@@ -50,6 +51,9 @@ pub enum DaemonError {
     #[error("claude error: {0}")]
     Claude(#[from] henry_claude::ClaudeError),
 
+    #[error("maintenance error: {0}")]
+    Maint(#[from] henry_maint::MaintError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -65,6 +69,7 @@ pub struct Daemon {
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
+    maint: Option<Arc<RwLock<MaintenanceManager>>>,
     shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -166,6 +171,15 @@ impl Daemon {
             None
         };
 
+        // Initialize maintenance manager if enabled
+        let maint = if config.maint.enabled {
+            let manager = MaintenanceManager::new(config.maint.clone());
+            info!("Maintenance manager initialized");
+            Some(Arc::new(RwLock::new(manager)))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             config_path,
@@ -176,6 +190,7 @@ impl Daemon {
             containers,
             media,
             claude,
+            maint,
             shutdown_tx,
         })
     }
@@ -421,6 +436,42 @@ impl Daemon {
             }
         }
 
+        // Start maintenance scheduler if enabled
+        if self.config.maint.enabled {
+            if let Some(ref maint) = self.maint {
+                let mut manager = maint.write().await;
+                match manager.start_scheduler().await {
+                    Ok(()) => {
+                        self.health
+                            .write()
+                            .await
+                            .update_module(ModuleHealth::new("maint").healthy())
+                            .await;
+                        info!("Maintenance scheduler started");
+                    }
+                    Err(e) => {
+                        warn!("Failed to start maintenance scheduler: {}", e);
+                        self.health
+                            .write()
+                            .await
+                            .update_module(
+                                ModuleHealth::new("maint")
+                                    .unhealthy(format!("Scheduler error: {}", e)),
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                self.health
+                    .write()
+                    .await
+                    .update_module(
+                        ModuleHealth::new("maint").unhealthy("Maintenance manager not initialized"),
+                    )
+                    .await;
+            }
+        }
+
         // Start HTTP server if enabled
         if self.config.http.enabled {
             let http_config = self.config.http.clone();
@@ -429,6 +480,7 @@ impl Daemon {
             let containers = self.containers.clone();
             let media = self.media.clone();
             let claude = self.claude.clone();
+            let maint = self.maint.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Resolve API token if configured
@@ -453,6 +505,7 @@ impl Daemon {
                     containers,
                     media,
                     claude,
+                    maint,
                     shutdown_rx,
                 )
                 .await
@@ -476,6 +529,7 @@ impl Daemon {
             let containers = self.containers.clone();
             let media = self.media.clone();
             let claude = self.claude.clone();
+            let maint = self.maint.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Get bot token from 1Password
@@ -497,7 +551,7 @@ impl Daemon {
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    henry_telegram::run_bot(token, telegram_config, health, containers, media, claude, shutdown_rx)
+                    henry_telegram::run_bot(token, telegram_config, health, containers, media, claude, maint, shutdown_rx)
                         .await
                 {
                     error!("Telegram bot error: {}", e);
@@ -521,6 +575,7 @@ impl Daemon {
             ("server", config.containers.enabled),
             ("media", config.media.enabled),
             ("claude", config.claude.enabled),
+            ("maint", config.maint.enabled),
             ("telegram", config.telegram.enabled),
             ("http", config.http.enabled),
         ];
@@ -544,6 +599,7 @@ impl Daemon {
             ("server", self.config.containers.enabled),
             ("media", self.config.media.enabled),
             ("claude", self.config.claude.enabled),
+            ("maint", self.config.maint.enabled),
             ("telegram", self.config.telegram.enabled),
             ("http", self.config.http.enabled),
         ];

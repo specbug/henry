@@ -13,6 +13,7 @@ use axum::{
 use henry_claude::{ClaudeManager, ClaudeStatus, SessionInfo};
 use henry_config::HttpConfig;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth, SystemMetrics};
+use henry_maint::{BackupInfo, MaintStatus, MaintenanceManager, ScheduledJob, UpdateInfo};
 use henry_media::{MediaLibrary, MediaManager, MediaStatus, PlaybackSession};
 use henry_server::{ContainerInfo, ContainerManager};
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,7 @@ pub struct AppState {
     pub containers: Option<Arc<RwLock<ContainerManager>>>,
     pub media: Option<Arc<RwLock<MediaManager>>>,
     pub claude: Option<Arc<RwLock<ClaudeManager>>>,
+    pub maint: Option<Arc<RwLock<MaintenanceManager>>>,
 }
 
 /// Health check response.
@@ -97,6 +99,7 @@ pub async fn run_server(
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
+    maint: Option<Arc<RwLock<MaintenanceManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), HttpError> {
     let state = AppState {
@@ -106,6 +109,7 @@ pub async fn run_server(
         containers,
         media,
         claude,
+        maint,
     };
 
     let app = create_router(state);
@@ -164,7 +168,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/claude/sessions/new", post(handle_claude_new_session))
         .route("/claude/sessions/{id}", get(handle_claude_get_session))
         .route("/claude/sessions/{id}/stop", post(handle_claude_stop_session))
-        .route("/claude/ask", post(handle_claude_ask));
+        .route("/claude/ask", post(handle_claude_ask))
+        // Maintenance endpoints
+        .route("/maint/status", get(handle_maint_status))
+        .route("/maint/backups", get(handle_maint_backups))
+        .route("/maint/backups/create", post(handle_maint_create_backup))
+        .route("/maint/backups/{name}", axum::routing::delete(handle_maint_delete_backup))
+        .route("/maint/jobs", get(handle_maint_jobs))
+        .route("/maint/rotate", post(handle_maint_rotate_logs))
+        .route("/maint/update-check", post(handle_maint_update_check));
 
     // Apply auth middleware if token is configured
     let api_routes = if state.api_token.is_some() {
@@ -744,6 +756,154 @@ async fn handle_claude_ask(
     }
 }
 
+// Maintenance response types
+#[derive(Serialize)]
+pub struct MaintBackupsResponse {
+    pub backups: Vec<BackupInfo>,
+}
+
+#[derive(Serialize)]
+pub struct MaintJobsResponse {
+    pub jobs: Vec<ScheduledJob>,
+}
+
+#[derive(Serialize)]
+pub struct MaintActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct LogRotationResponse {
+    pub success: bool,
+    pub files_rotated: usize,
+    pub files_deleted: usize,
+    pub bytes_processed: u64,
+}
+
+async fn handle_maint_status(
+    State(state): State<AppState>,
+) -> Result<Json<MaintStatus>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let manager = maint.read().await;
+    Ok(Json(manager.status().await))
+}
+
+async fn handle_maint_backups(
+    State(state): State<AppState>,
+) -> Result<Json<MaintBackupsResponse>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let manager = maint.read().await;
+    match manager.list_backups() {
+        Ok(backups) => Ok(Json(MaintBackupsResponse { backups })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_maint_create_backup(
+    State(state): State<AppState>,
+) -> Result<Json<BackupInfo>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let mut manager = maint.write().await;
+    match manager.backup_now().await {
+        Ok(backup) => Ok(Json(backup)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_maint_delete_backup(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<MaintActionResponse>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let manager = maint.read().await;
+    match manager.delete_backup(&name) {
+        Ok(()) => Ok(Json(MaintActionResponse {
+            success: true,
+            message: format!("Deleted backup: {}", name),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_maint_jobs(
+    State(state): State<AppState>,
+) -> Result<Json<MaintJobsResponse>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let manager = maint.read().await;
+    let jobs = manager.list_jobs().await;
+    Ok(Json(MaintJobsResponse { jobs }))
+}
+
+async fn handle_maint_rotate_logs(
+    State(state): State<AppState>,
+) -> Result<Json<LogRotationResponse>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let mut manager = maint.write().await;
+    match manager.rotate_logs_now().await {
+        Ok(result) => Ok(Json(LogRotationResponse {
+            success: true,
+            files_rotated: result.files_rotated,
+            files_deleted: result.files_deleted,
+            bytes_processed: result.bytes_processed,
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_maint_update_check(
+    State(state): State<AppState>,
+) -> Result<Json<UpdateInfo>, (StatusCode, String)> {
+    let Some(ref maint) = state.maint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance module not enabled".to_string(),
+        ));
+    };
+
+    let mut manager = maint.write().await;
+    match manager.check_updates_now().await {
+        Ok(info) => Ok(Json(info)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,6 +919,7 @@ mod tests {
             containers: None,
             media: None,
             claude: None,
+            maint: None,
         }
     }
 
