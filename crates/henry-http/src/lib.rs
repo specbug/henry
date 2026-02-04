@@ -12,6 +12,7 @@ use axum::{
 };
 use henry_config::HttpConfig;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth, SystemMetrics};
+use henry_media::{MediaLibrary, MediaManager, MediaStatus, PlaybackSession};
 use henry_server::{ContainerInfo, ContainerManager};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -21,7 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::info;
 
 mod auth;
 
@@ -41,6 +42,7 @@ pub struct AppState {
     pub config: HttpConfig,
     pub api_token: Option<String>,
     pub containers: Option<Arc<RwLock<ContainerManager>>>,
+    pub media: Option<Arc<RwLock<MediaManager>>>,
 }
 
 /// Health check response.
@@ -91,6 +93,7 @@ pub async fn run_server(
     health: Arc<RwLock<HealthManager>>,
     api_token: Option<String>,
     containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), HttpError> {
     let state = AppState {
@@ -98,6 +101,7 @@ pub async fn run_server(
         config: config.clone(),
         api_token: api_token.clone(),
         containers,
+        media,
     };
 
     let app = create_router(state);
@@ -140,7 +144,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/containers/{name}/start", post(handle_container_start))
         .route("/containers/{name}/stop", post(handle_container_stop))
         .route("/containers/{name}/restart", post(handle_container_restart))
-        .route("/containers/{name}/logs", get(handle_container_logs));
+        .route("/containers/{name}/logs", get(handle_container_logs))
+        // Media endpoints
+        .route("/media/status", get(handle_media_status))
+        .route("/media/libraries", get(handle_media_libraries))
+        .route("/media/sessions", get(handle_media_sessions))
+        .route("/media/scan", post(handle_media_scan))
+        .route("/media/start", post(handle_media_start))
+        .route("/media/stop", post(handle_media_stop))
+        .route("/media/restart", post(handle_media_restart))
+        .route("/media/logs", get(handle_media_logs));
 
     // Apply auth middleware if token is configured
     let api_routes = if state.api_token.is_some() {
@@ -389,6 +402,171 @@ async fn handle_container_logs(
     }
 }
 
+// Media response types
+#[derive(Serialize)]
+pub struct MediaLibrariesResponse {
+    pub libraries: Vec<MediaLibrary>,
+}
+
+#[derive(Serialize)]
+pub struct MediaSessionsResponse {
+    pub sessions: Vec<PlaybackSession>,
+}
+
+#[derive(Serialize)]
+pub struct MediaActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+async fn handle_media_status(
+    State(state): State<AppState>,
+) -> Result<Json<MediaStatus>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    Ok(Json(manager.status().await))
+}
+
+async fn handle_media_libraries(
+    State(state): State<AppState>,
+) -> Result<Json<MediaLibrariesResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    match manager.libraries().await {
+        Ok(libraries) => Ok(Json(MediaLibrariesResponse { libraries })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_media_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<MediaSessionsResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    match manager.active_sessions().await {
+        Ok(sessions) => Ok(Json(MediaSessionsResponse { sessions })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_media_scan(
+    State(state): State<AppState>,
+) -> Result<Json<MediaActionResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    match manager.scan_libraries().await {
+        Ok(()) => Ok(Json(MediaActionResponse {
+            success: true,
+            message: "Library scan started".to_string(),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_media_start(
+    State(state): State<AppState>,
+) -> Result<Json<MediaActionResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    match manager.start_container().await {
+        Ok(()) => Ok(Json(MediaActionResponse {
+            success: true,
+            message: format!("Started Jellyfin container: {}", manager.container_name()),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_media_stop(
+    State(state): State<AppState>,
+) -> Result<Json<MediaActionResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    match manager.stop_container().await {
+        Ok(()) => Ok(Json(MediaActionResponse {
+            success: true,
+            message: format!("Stopped Jellyfin container: {}", manager.container_name()),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_media_restart(
+    State(state): State<AppState>,
+) -> Result<Json<MediaActionResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let manager = media.read().await;
+    match manager.restart_container().await {
+        Ok(()) => Ok(Json(MediaActionResponse {
+            success: true,
+            message: format!("Restarted Jellyfin container: {}", manager.container_name()),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_media_logs(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<ContainerLogsResponse>, (StatusCode, String)> {
+    let Some(ref media) = state.media else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Media module not enabled".to_string(),
+        ));
+    };
+
+    let tail = query.tail.unwrap_or(50);
+    let manager = media.read().await;
+    let name = manager.container_name().to_string();
+    match manager.container_logs(tail).await {
+        Ok(logs) => Ok(Json(ContainerLogsResponse { name, logs })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +580,7 @@ mod tests {
             config: HttpConfig::default(),
             api_token: None,
             containers: None,
+            media: None,
         }
     }
 

@@ -54,6 +54,10 @@ enabled = false
 library_paths = []
 # Jellyfin container name
 jellyfin_container = "jellyfin"
+# Jellyfin server URL
+jellyfin_url = "http://localhost:8096"
+# 1Password reference for Jellyfin API key
+# jellyfin_api_key_ref = "op://Private/Jellyfin/api-key"
 # Enable hardware transcoding (VideoToolbox on macOS)
 hw_transcode = true
 

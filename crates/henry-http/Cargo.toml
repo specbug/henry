@@ -27,6 +27,7 @@ http.workspace = true
 henry-config.workspace = true
 henry-health.workspace = true
 henry-server.workspace = true
+henry-media.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

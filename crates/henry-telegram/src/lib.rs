@@ -4,13 +4,14 @@
 
 use henry_config::TelegramConfig;
 use henry_health::{format_bytes, format_duration, HealthManager, HealthStatus};
+use henry_media::{format_ticks, MediaManager};
 use henry_server::ContainerManager;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 mod auth;
 pub use auth::is_authorized;
@@ -46,6 +47,8 @@ pub enum Command {
     Containers,
     #[command(description = "container action: start|stop|restart|logs <name>")]
     Container(String),
+    #[command(description = "media status and info")]
+    Media(String),
     #[command(description = "start the bot")]
     Start,
 }
@@ -55,6 +58,7 @@ pub struct BotState {
     pub health: Arc<RwLock<HealthManager>>,
     pub config: TelegramConfig,
     pub containers: Option<Arc<RwLock<ContainerManager>>>,
+    pub media: Option<Arc<RwLock<MediaManager>>>,
 }
 
 /// Create and run the Telegram bot.
@@ -63,6 +67,7 @@ pub async fn run_bot(
     config: TelegramConfig,
     health: Arc<RwLock<HealthManager>>,
     containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), TelegramError> {
     if token.is_empty() {
@@ -74,6 +79,7 @@ pub async fn run_bot(
         health,
         config: config.clone(),
         containers,
+        media,
     });
 
     info!("Starting Telegram bot");
@@ -157,6 +163,7 @@ async fn handle_command(
         Command::Metrics => format_metrics(&state).await,
         Command::Containers => format_containers(&state).await,
         Command::Container(args) => handle_container_command(&state, &args).await,
+        Command::Media(args) => handle_media_command(&state, &args).await,
     };
 
     bot.send_message(msg.chat.id, response).await?;
@@ -343,6 +350,158 @@ async fn handle_container_command(state: &BotState, args: &str) -> String {
     }
 }
 
+async fn handle_media_command(state: &BotState, args: &str) -> String {
+    let Some(ref media) = state.media else {
+        return "Media module not enabled.".to_string();
+    };
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let action = parts.first().map(|s| s.to_lowercase());
+
+    match action.as_deref() {
+        None | Some("status") => format_media_status(media).await,
+        Some("libraries") | Some("libs") => format_media_libraries(media).await,
+        Some("sessions") | Some("playing") => format_media_sessions(media).await,
+        Some("scan") => {
+            let manager = media.read().await;
+            match manager.scan_libraries().await {
+                Ok(()) => "Library scan started.".to_string(),
+                Err(e) => format!("Error triggering scan: {}", e),
+            }
+        }
+        Some("start") => {
+            let manager = media.read().await;
+            match manager.start_container().await {
+                Ok(()) => format!("Started Jellyfin container: {}", manager.container_name()),
+                Err(e) => format!("Error starting Jellyfin: {}", e),
+            }
+        }
+        Some("stop") => {
+            let manager = media.read().await;
+            match manager.stop_container().await {
+                Ok(()) => format!("Stopped Jellyfin container: {}", manager.container_name()),
+                Err(e) => format!("Error stopping Jellyfin: {}", e),
+            }
+        }
+        Some("restart") => {
+            let manager = media.read().await;
+            match manager.restart_container().await {
+                Ok(()) => format!("Restarted Jellyfin container: {}", manager.container_name()),
+                Err(e) => format!("Error restarting Jellyfin: {}", e),
+            }
+        }
+        Some("logs") => {
+            let tail = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
+            let manager = media.read().await;
+            match manager.container_logs(tail).await {
+                Ok(logs) => {
+                    if logs.is_empty() {
+                        "No Jellyfin logs.".to_string()
+                    } else {
+                        let max_len = 4000;
+                        if logs.len() > max_len {
+                            format!("Jellyfin logs (truncated):\n```\n{}...\n```", &logs[..max_len])
+                        } else {
+                            format!("Jellyfin logs:\n```\n{}\n```", logs)
+                        }
+                    }
+                }
+                Err(e) => format!("Error getting logs: {}", e),
+            }
+        }
+        _ => "Usage: /media [status|libraries|sessions|scan|start|stop|restart|logs]".to_string(),
+    }
+}
+
+async fn format_media_status(media: &Arc<RwLock<MediaManager>>) -> String {
+    let manager = media.read().await;
+    let status = manager.status().await;
+
+    let mut lines = vec!["Media Status:".to_string()];
+
+    lines.push(format!(
+        "  Container: {}",
+        if status.container_running { "running" } else { "stopped" }
+    ));
+    lines.push(format!(
+        "  API: {}",
+        if status.api_reachable { "reachable" } else { "unreachable" }
+    ));
+
+    if let Some(ref server) = status.server {
+        lines.push(format!("  Server: {} v{}", server.name, server.version));
+        lines.push(format!(
+            "  HW Transcode: {}",
+            if server.hw_transcode_available { "available" } else { "not available" }
+        ));
+    }
+
+    lines.push(format!("  Libraries: {}", status.library_count));
+    lines.push(format!("  Active Sessions: {}", status.active_sessions));
+
+    if !status.library_paths.is_empty() {
+        lines.push("  Paths:".to_string());
+        for path in &status.library_paths {
+            lines.push(format!("    {}", path));
+        }
+    }
+
+    lines.join("\n")
+}
+
+async fn format_media_libraries(media: &Arc<RwLock<MediaManager>>) -> String {
+    let manager = media.read().await;
+    match manager.libraries().await {
+        Ok(libs) => {
+            if libs.is_empty() {
+                return "No libraries configured.".to_string();
+            }
+            let mut lines = vec!["Libraries:".to_string()];
+            for lib in libs {
+                lines.push(format!("  {} ({})", lib.name, lib.content_type));
+                for path in &lib.paths {
+                    lines.push(format!("    {}", path));
+                }
+            }
+            lines.join("\n")
+        }
+        Err(e) => format!("Error fetching libraries: {}", e),
+    }
+}
+
+async fn format_media_sessions(media: &Arc<RwLock<MediaManager>>) -> String {
+    let manager = media.read().await;
+    match manager.active_sessions().await {
+        Ok(sessions) => {
+            if sessions.is_empty() {
+                return "No active playback sessions.".to_string();
+            }
+            let mut lines = vec!["Active Sessions:".to_string()];
+            for s in sessions {
+                let progress = match (s.position_ticks, s.duration_ticks) {
+                    (Some(pos), Some(dur)) if dur > 0 => {
+                        format!(" [{}/{}]", format_ticks(pos), format_ticks(dur))
+                    }
+                    _ => String::new(),
+                };
+                let pause_indicator = if s.is_paused { " (paused)" } else { "" };
+                let transcode = s
+                    .transcode_info
+                    .as_deref()
+                    .map(|t| format!(" [{}]", t))
+                    .unwrap_or_default();
+
+                lines.push(format!(
+                    "  {} on {}: {}{}{}{}",
+                    s.user, s.client, s.item_name, progress, pause_indicator, transcode
+                ));
+            }
+            lines.join("\n")
+        }
+        Err(e) => format!("Error fetching sessions: {}", e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +511,6 @@ mod tests {
         let desc = Command::descriptions().to_string();
         assert!(desc.contains("help"));
         assert!(desc.contains("status"));
+        assert!(desc.contains("media"));
     }
 }

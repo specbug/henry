@@ -184,6 +184,10 @@ pub struct MediaConfig {
     pub library_paths: Vec<PathBuf>,
     /// Jellyfin container name.
     pub jellyfin_container: String,
+    /// Jellyfin server URL (e.g., http://localhost:8096).
+    pub jellyfin_url: String,
+    /// 1Password secret reference for Jellyfin API key.
+    pub jellyfin_api_key_ref: Option<String>,
     /// Enable hardware transcoding (VideoToolbox on macOS).
     pub hw_transcode: bool,
 }
@@ -194,6 +198,8 @@ impl Default for MediaConfig {
             enabled: false,
             library_paths: vec![],
             jellyfin_container: "jellyfin".to_string(),
+            jellyfin_url: "http://localhost:8096".to_string(),
+            jellyfin_api_key_ref: None,
             hw_transcode: true,
         }
     }

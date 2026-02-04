@@ -70,7 +70,11 @@ henry/
 │   ├── henry-secrets/   # 1Password CLI integration
 │   ├── henry-state/     # SQLite state
 │   ├── henry-health/    # Health probes, metrics
-│   └── henry-tui/       # Ratatui interface
+│   ├── henry-tui/       # Ratatui interface
+│   ├── henry-telegram/  # Telegram bot (allowlist auth)
+│   ├── henry-http/      # Axum REST API
+│   ├── henry-server/    # Podman/Docker container mgmt
+│   └── henry-media/     # Jellyfin media server mgmt
 └── config.example.toml
 ```
 

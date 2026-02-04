@@ -351,17 +351,119 @@ pub async fn run_bot(
 
 ---
 
-## Phase 4: Media (NEXT)
+## Phase 4: Media (COMPLETE)
 
-### `henry-media`
-- Jellyfin container management
-- Library path configuration
-- Hardware transcoding (VideoToolbox on macOS)
-- Library scan triggers
+**Completed:** 2026-02-04
+
+### Implemented Crate: `henry-media`
+
+**Purpose:** Jellyfin media server management via container lifecycle + REST API
+
+### Directory Structure
+
+```
+crates/henry-media/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # MediaManager, MediaError, public API
+    ├── jellyfin.rs     # JellyfinClient, Jellyfin REST API integration
+    └── types.rs        # ServerInfo, MediaLibrary, PlaybackSession, MediaStatus, Jellyfin API DTOs
+```
+
+### Key Features
+
+1. **Jellyfin container lifecycle**: start, stop, restart, logs (delegates to `henry-server::ContainerManager`)
+2. **Jellyfin REST API client**: system info, library listing, library scan, active sessions
+3. **Library path validation**: Checks configured paths exist on disk
+4. **Hardware transcoding status**: Reports VideoToolbox/hw acceleration availability from Jellyfin
+5. **Playback monitoring**: Active sessions with progress, pause state, and transcode info
+6. **Unified status**: Single `MediaStatus` combining container state, API reachability, and server info
+
+### Config
+
+```toml
+[media]
+enabled = true
+library_paths = ["/Volumes/Media/Movies", "/Volumes/Media/TV"]
+jellyfin_container = "jellyfin"
+jellyfin_url = "http://localhost:8096"
+jellyfin_api_key_ref = "op://Private/Jellyfin/api-key"
+hw_transcode = true
+```
+
+### Telegram Commands
+
+- `/media` or `/media status` - Show media module status
+- `/media libraries` - List Jellyfin libraries
+- `/media sessions` - Show active playback sessions
+- `/media scan` - Trigger full library scan
+- `/media start` - Start Jellyfin container
+- `/media stop` - Stop Jellyfin container
+- `/media restart` - Restart Jellyfin container
+- `/media logs [tail]` - Get Jellyfin container logs
+
+### HTTP API Endpoints
+
+- `GET /api/media/status` - Full media module status
+- `GET /api/media/libraries` - List all libraries
+- `GET /api/media/sessions` - Active playback sessions
+- `POST /api/media/scan` - Trigger library scan
+- `POST /api/media/start` - Start Jellyfin container
+- `POST /api/media/stop` - Stop Jellyfin container
+- `POST /api/media/restart` - Restart Jellyfin container
+- `GET /api/media/logs?tail=50` - Get Jellyfin logs
+
+### Tests
+
+11 new unit tests (46 total):
+- `henry-media` types: 5 tests (media status, playback session, Jellyfin JSON deserialization)
+- `henry-media` jellyfin: 2 tests (format_ticks, URL trimming)
+- `henry-media` lib: 4 tests (manager creation, path validation, container name, status without services)
+
+### Code Patterns (Updated)
+
+**Service signatures now include media** (in `daemon.rs`):
+```rust
+// Shared media manager
+let media: Option<Arc<RwLock<MediaManager>>> = if config.media.enabled {
+    let api_key = resolve_jellyfin_api_key(&secrets, &config.media).await;
+    let manager = MediaManager::new(config.media.clone(), containers.clone(), api_key);
+    Some(Arc::new(RwLock::new(manager)))
+} else { None };
+
+// Pass to services
+henry_http::run_server(config, &bind_addr, health, api_token, containers, media, shutdown_rx)
+henry_telegram::run_bot(token, config, health, containers, media, shutdown_rx)
+```
+
+**HTTP server signature**:
+```rust
+pub async fn run_server(
+    config: HttpConfig,
+    bind_addr: &str,
+    health: Arc<RwLock<HealthManager>>,
+    api_token: Option<String>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), HttpError>
+```
+
+**Telegram bot signature**:
+```rust
+pub async fn run_bot(
+    token: String,
+    config: TelegramConfig,
+    health: Arc<RwLock<HealthManager>>,
+    containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,  // NEW
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), TelegramError>
+```
 
 ---
 
-## Phase 5: AI Integration
+## Phase 5: AI Integration (NEXT)
 
 ### `henry-claude`
 - Anthropic API client

@@ -3,6 +3,7 @@
 use henry_config::Config;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
+use henry_media::MediaManager;
 use henry_secrets::SecretManager;
 use henry_server::ContainerManager;
 use henry_state::StateManager;
@@ -42,6 +43,9 @@ pub enum DaemonError {
     #[error("container error: {0}")]
     Container(#[from] henry_server::ContainerError),
 
+    #[error("media error: {0}")]
+    Media(#[from] henry_media::MediaError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -55,6 +59,7 @@ pub struct Daemon {
     health: Arc<RwLock<HealthManager>>,
     secrets: SecretManager,
     containers: Option<Arc<RwLock<ContainerManager>>>,
+    media: Option<Arc<RwLock<MediaManager>>>,
     shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -93,7 +98,7 @@ impl Daemon {
         let health = Arc::new(RwLock::new(HealthManager::new(env!("CARGO_PKG_VERSION"))));
 
         // Initialize secrets manager
-        let secrets = SecretManager::new();
+        let mut secrets = SecretManager::new();
 
         // Create shutdown broadcast channel
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -114,6 +119,31 @@ impl Daemon {
             None
         };
 
+        // Initialize media manager if enabled
+        let media = if config.media.enabled {
+            let api_key = if let Some(ref key_ref) = config.media.jellyfin_api_key_ref {
+                match secrets.get(key_ref).await {
+                    Ok(key) => Some(key),
+                    Err(e) => {
+                        warn!("Failed to get Jellyfin API key: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let manager = MediaManager::new(
+                config.media.clone(),
+                containers.clone(),
+                api_key,
+            );
+            info!("Media manager initialized");
+            Some(Arc::new(RwLock::new(manager)))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             config_path,
@@ -122,6 +152,7 @@ impl Daemon {
             health,
             secrets,
             containers,
+            media,
             shutdown_tx,
         })
     }
@@ -295,12 +326,54 @@ impl Daemon {
             }
         }
 
+        // Update media module health
+        if self.config.media.enabled {
+            if let Some(ref media) = self.media {
+                let manager = media.read().await;
+                let status = manager.status().await;
+                if status.api_reachable {
+                    self.health
+                        .write()
+                        .await
+                        .update_module(ModuleHealth::new("media").healthy())
+                        .await;
+                } else if status.container_running {
+                    self.health
+                        .write()
+                        .await
+                        .update_module(
+                            ModuleHealth::new("media")
+                                .unhealthy("Jellyfin API not reachable"),
+                        )
+                        .await;
+                } else {
+                    self.health
+                        .write()
+                        .await
+                        .update_module(
+                            ModuleHealth::new("media")
+                                .unhealthy("Jellyfin container not running"),
+                        )
+                        .await;
+                }
+            } else {
+                self.health
+                    .write()
+                    .await
+                    .update_module(
+                        ModuleHealth::new("media").unhealthy("Media manager not initialized"),
+                    )
+                    .await;
+            }
+        }
+
         // Start HTTP server if enabled
         if self.config.http.enabled {
             let http_config = self.config.http.clone();
             let bind_addr = self.config.network.bind_address.clone();
             let health = self.health.clone();
             let containers = self.containers.clone();
+            let media = self.media.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Resolve API token if configured
@@ -323,6 +396,7 @@ impl Daemon {
                     health,
                     api_token,
                     containers,
+                    media,
                     shutdown_rx,
                 )
                 .await
@@ -344,6 +418,7 @@ impl Daemon {
             let telegram_config = self.config.telegram.clone();
             let health = self.health.clone();
             let containers = self.containers.clone();
+            let media = self.media.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Get bot token from 1Password
@@ -365,7 +440,7 @@ impl Daemon {
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    henry_telegram::run_bot(token, telegram_config, health, containers, shutdown_rx)
+                    henry_telegram::run_bot(token, telegram_config, health, containers, media, shutdown_rx)
                         .await
                 {
                     error!("Telegram bot error: {}", e);
