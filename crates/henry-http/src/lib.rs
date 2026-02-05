@@ -1,6 +1,7 @@
 //! HTTP API server for Henry daemon.
 //!
 //! Provides REST endpoints for status, health, module, and container information.
+//! Also provides WebSocket support for real-time event streaming at `/ws`.
 
 use axum::{
     extract::{Path, Query, State},
@@ -21,14 +22,18 @@ use henry_server::{ContainerInfo, ContainerManager};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
 mod auth;
+mod ws;
+
+pub use ws::WsEvent;
 
 #[derive(Error, Debug)]
 pub enum HttpError {
@@ -51,6 +56,7 @@ pub struct AppState {
     pub maint: Option<Arc<RwLock<MaintenanceManager>>>,
     pub reactive: Option<Arc<RwLock<ReactiveEngine>>>,
     pub agent: Option<Arc<RwLock<AgentEngine>>>,
+    pub event_tx: broadcast::Sender<WsEvent>,
 }
 
 /// Health check response.
@@ -106,10 +112,11 @@ pub async fn run_server(
     maint: Option<Arc<RwLock<MaintenanceManager>>>,
     reactive: Option<Arc<RwLock<ReactiveEngine>>>,
     agent: Option<Arc<RwLock<AgentEngine>>>,
-    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    event_tx: broadcast::Sender<WsEvent>,
+    mut shutdown: broadcast::Receiver<()>,
 ) -> Result<(), HttpError> {
     let state = AppState {
-        health,
+        health: health.clone(),
         config: config.clone(),
         api_token: api_token.clone(),
         containers,
@@ -118,6 +125,7 @@ pub async fn run_server(
         maint,
         reactive,
         agent,
+        event_tx: event_tx.clone(),
     };
 
     let app = create_router(state);
@@ -127,6 +135,43 @@ pub async fn run_server(
         .map_err(|e| HttpError::Server(format!("invalid address: {}", e)))?;
 
     info!("Starting HTTP server on {}", addr);
+
+    // Spawn health ticker to broadcast health updates every 5 seconds
+    let health_ticker_tx = event_tx.clone();
+    let health_ticker_health = health.clone();
+    let mut ticker_shutdown = shutdown.resubscribe();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let mut health_guard = health_ticker_health.write().await;
+                    let metrics = health_guard.get_system_metrics();
+                    let uptime = health_guard.uptime().as_secs();
+                    drop(health_guard);
+
+                    // Calculate average disk usage across all disks
+                    let disk_percent = if metrics.disks.is_empty() {
+                        0.0
+                    } else {
+                        metrics.disks.iter().map(|d| d.percent).sum::<f32>() / metrics.disks.len() as f32
+                    };
+
+                    let event = WsEvent::HealthUpdate {
+                        cpu_percent: metrics.cpu_percent,
+                        memory_percent: metrics.memory_percent,
+                        disk_percent,
+                        uptime_secs: uptime,
+                    };
+                    // Ignore send errors (no subscribers)
+                    let _ = health_ticker_tx.send(event);
+                }
+                _ = ticker_shutdown.recv() => {
+                    break;
+                }
+            }
+        }
+    });
 
     let listener = TcpListener::bind(addr).await.map_err(HttpError::Bind)?;
 
@@ -213,6 +258,7 @@ pub fn create_router(state: AppState) -> Router {
     };
 
     Router::new()
+        .route("/ws", get(ws::ws_handler))
         .route("/health", get(handle_health))
         .route("/", get(handle_root))
         .nest("/api", api_routes)
@@ -1440,6 +1486,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn create_test_state() -> AppState {
+        let (event_tx, _) = broadcast::channel(16);
         AppState {
             health: Arc::new(RwLock::new(HealthManager::new("0.1.0-test"))),
             config: HttpConfig::default(),
@@ -1450,6 +1497,7 @@ mod tests {
             maint: None,
             reactive: None,
             agent: None,
+            event_tx,
         }
     }
 

@@ -79,7 +79,7 @@ fn is_local_ip(ip: &str) -> bool {
 }
 
 /// Timing-safe token comparison.
-fn verify_token(provided: &str, expected: &str) -> bool {
+pub fn verify_token(provided: &str, expected: &str) -> bool {
     let provided_bytes = provided.as_bytes();
     let expected_bytes = expected.as_bytes();
 

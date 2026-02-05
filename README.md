@@ -6,6 +6,7 @@ A security-first, minimal Rust daemon for Mac Mini M4 Pro that manages home serv
 
 - **Container Management**: Deploy and manage containers via Podman
 - **Communication**: Telegram bot with allowlist authentication
+- **HTTP API**: REST endpoints with WebSocket for real-time events
 - **AI Integration**: Spawn Claude Code sessions
 - **Media Server**: Jellyfin with hardware transcoding (VideoToolbox)
 - **Self-Maintenance**: Autonomous backups, updates, and health monitoring
@@ -72,11 +73,26 @@ henry/
 │   ├── henry-health/    # Health probes, metrics
 │   ├── henry-tui/       # Ratatui interface
 │   ├── henry-telegram/  # Telegram bot (allowlist auth)
-│   ├── henry-http/      # Axum REST API
+│   ├── henry-http/      # Axum REST API + WebSocket
 │   ├── henry-server/    # Podman/Docker container mgmt
-│   └── henry-media/     # Jellyfin media server mgmt
+│   ├── henry-media/     # Jellyfin media server mgmt
+│   ├── henry-claude/    # Anthropic API + Claude Code
+│   ├── henry-maint/     # Backups, log rotation, updates
+│   ├── henry-reactive/  # Anomaly detection, auto-remediation
+│   └── henry-agent/     # ReAct pattern task execution
 └── config.example.toml
 ```
+
+## WebSocket
+
+Real-time events at `/ws`:
+
+```bash
+# Connect (with optional token auth)
+websocat "ws://localhost:8080/ws?token=YOUR_TOKEN"
+```
+
+Events: `health_update` (every 5s), `container_state_changed`, `anomaly_detected`, `agent_task_update`
 
 ## Keyboard Shortcuts (TUI)
 

@@ -78,6 +78,7 @@ pub struct Daemon {
     reactive: Option<Arc<RwLock<ReactiveEngine>>>,
     agent: Option<Arc<RwLock<AgentEngine>>>,
     shutdown_tx: broadcast::Sender<()>,
+    event_tx: broadcast::Sender<henry_http::WsEvent>,
 }
 
 impl Daemon {
@@ -119,6 +120,9 @@ impl Daemon {
 
         // Create shutdown broadcast channel
         let (shutdown_tx, _) = broadcast::channel(1);
+
+        // Create WebSocket event bus
+        let (event_tx, _) = broadcast::channel::<henry_http::WsEvent>(256);
 
         // Initialize container manager if enabled
         let containers = if config.containers.enabled {
@@ -267,6 +271,7 @@ impl Daemon {
             reactive,
             agent,
             shutdown_tx,
+            event_tx,
         })
     }
 
@@ -558,6 +563,7 @@ impl Daemon {
             let maint = self.maint.clone();
             let reactive = self.reactive.clone();
             let agent_http = self.agent.clone();
+            let event_tx = self.event_tx.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Resolve API token if configured
@@ -585,6 +591,7 @@ impl Daemon {
                     maint,
                     reactive,
                     agent_http,
+                    event_tx,
                     shutdown_rx,
                 )
                 .await

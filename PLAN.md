@@ -942,6 +942,78 @@ Tests included in Phase 7 & 8 commit:
 
 ---
 
+## Phase 9: WebSocket Support (COMPLETE)
+
+**Completed:** 2025-02-05
+
+### Purpose
+
+Real-time event streaming via WebSocket at `/ws` endpoint, replacing REST polling for live updates.
+
+### Files Modified
+
+```
+Cargo.toml                     # Added ws feature to axum
+crates/henry-http/
+├── Cargo.toml                 # Added futures-util, uuid deps
+└── src/
+    ├── lib.rs                 # Added event_tx to AppState, /ws route, health ticker
+    ├── auth.rs                # Made verify_token() public
+    └── ws.rs                  # NEW: WsEvent, WsClientMessage, ws_handler
+crates/henry-core/src/
+└── daemon.rs                  # Created event bus, pass to run_server()
+```
+
+### WebSocket Events
+
+| Event | Description |
+|-------|-------------|
+| `connected` | Client connected (includes client_id) |
+| `health_update` | System metrics every 5s (CPU, memory, disk, uptime) |
+| `container_state_changed` | Container state transition |
+| `anomaly_detected` | New anomaly from reactive engine |
+| `anomaly_resolved` | Anomaly resolved |
+| `action_executed` | Remediation action completed |
+| `agent_task_update` | Agent task status change |
+| `pong` | Response to client ping |
+
+### Client Messages
+
+| Message | Description |
+|---------|-------------|
+| `ping` | Keepalive ping |
+
+### Usage
+
+```bash
+# Connect without auth (if no token configured)
+websocat ws://localhost:8080/ws
+
+# Connect with auth
+websocat "ws://localhost:8080/ws?token=YOUR_TOKEN"
+```
+
+### Authentication
+
+- Token passed via `?token=` query parameter
+- Uses same `verify_token()` as REST API (timing-safe)
+- No auth required if `api_token` not configured
+
+### Implementation Details
+
+1. **Event bus**: `broadcast::channel<WsEvent>(256)` created in daemon
+2. **Health ticker**: Spawned in `run_server()`, broadcasts every 5s
+3. **Client handling**: Each client subscribes to event bus, forwards JSON
+4. **Graceful disconnect**: Send task aborted on client disconnect
+
+### Tests
+
+6 tests in henry-http (121 total):
+- `ws::tests::test_ws_event_serialization` - WsEvent JSON format
+- `ws::tests::test_ws_client_message_parsing` - Client message parsing
+
+---
+
 ## Security Patterns (from OpenClaw)
 
 1. **Timing-safe comparison**: `subtle::ConstantTimeEq` for tokens

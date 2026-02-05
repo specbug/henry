@@ -46,7 +46,7 @@ The project is a Cargo workspace with 16 crates in `crates/`:
 | `henry-health` | System metrics via sysinfo |
 | `henry-tui` | Ratatui terminal interface |
 | `henry-telegram` | Telegram bot (Teloxide) with allowlist auth |
-| `henry-http` | Axum REST API with Bearer token auth |
+| `henry-http` | Axum REST API with Bearer token auth, WebSocket events |
 | `henry-server` | Podman/Docker container management (bollard) |
 | `henry-media` | Jellyfin media server integration |
 | `henry-claude` | Anthropic API client + Claude Code session spawning |
@@ -86,8 +86,19 @@ pub async fn run_server(
     maint: Option<Arc<RwLock<MaintenanceManager>>>,
     reactive: Option<Arc<RwLock<ReactiveEngine>>>,
     agent: Option<Arc<RwLock<AgentEngine>>>,
+    event_tx: broadcast::Sender<WsEvent>,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<(), HttpError>
+```
+
+**WebSocket event broadcasting**:
+```rust
+// Event bus created alongside shutdown channel
+let (shutdown_tx, _) = broadcast::channel(1);
+let (event_tx, _) = broadcast::channel::<henry_http::WsEvent>(256);
+
+// Broadcast events from anywhere
+let _ = event_tx.send(WsEvent::HealthUpdate { ... });
 ```
 
 **Module registration in `daemon.rs`**:

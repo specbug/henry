@@ -45,7 +45,7 @@ subtle = "2"
 teloxide = { version = "0.13", features = ["macros"] }
 
 # HTTP
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 http = "1"
