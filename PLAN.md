@@ -72,7 +72,10 @@ henry/
 │   ├── henry-claude/             # (Phase 5) Anthropic API + Claude Code
 │   ├── henry-maint/              # (Phase 6) Updates, backup, cleanup
 │   ├── henry-reactive/           # (Phase 7) Reactive control loop
-│   └── henry-agent/              # (Phase 8) Agentic task execution
+│   ├── henry-agent/              # (Phase 8) Agentic task execution
+│   ├── henry-proxy/              # (Phase 10) Caddy reverse proxy
+│   ├── henry-apps/               # (Phase 10) App deployment
+│   └── henry-tunnel/             # (Phase 10) Cloudflare Tunnel
 └── tests/
 
 Runtime (~/.henry/):
@@ -1080,5 +1083,219 @@ serve_https = true
 ## Git Info
 
 - **Repository**: Working in `henry/` subdirectory
-- **Branch**: `init`
-- **Remote**: `origin` → `https://github.com/specbug/openclaw.git`
+- **Branch**: `main`
+- **Remote**: `origin` → `https://github.com/specbug/henry.git`
+
+---
+
+## Phase 10: PaaS - App Deployment (COMPLETE)
+
+**Completed:** 2025-02-05
+
+### Purpose
+
+Self-hosted PaaS enabling app deployment from GitHub repos to custom domains with a simple command:
+```
+"deploy github.com/user/myapp to sixeleven.in/myapp"
+```
+
+### Architecture
+
+```
+Internet → Cloudflare Tunnel → Caddy (reverse proxy) → App containers
+                                      ↓
+                              Henry manages all of this
+```
+
+### Implemented Crates
+
+| Crate | Purpose |
+|-------|---------|
+| `henry-proxy` | Caddy container management, dynamic route configuration, Caddyfile generation |
+| `henry-apps` | Git clone, Dockerfile detection/generation, image building, container deployment |
+| `henry-tunnel` | Cloudflare Tunnel (cloudflared) container, DNS record management |
+
+### Directory Structure
+
+```
+crates/henry-proxy/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # ProxyManager
+    ├── caddy.rs        # Caddyfile generation
+    └── types.rs        # Route, ProxyStatus
+
+crates/henry-apps/
+├── Cargo.toml
+├── templates/          # Dockerfile templates (Node, Python, Rust, Go)
+└── src/
+    ├── lib.rs          # AppsManager
+    ├── git.rs          # Git operations, URL validation
+    ├── builder.rs      # Dockerfile detection/generation, image building
+    ├── deployer.rs     # Container deployment
+    └── types.rs        # App, AppStatus
+
+crates/henry-tunnel/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # TunnelManager
+    ├── cloudflared.rs  # Container management
+    ├── api.rs          # Cloudflare API client
+    └── types.rs        # TunnelRoute, TunnelStatus
+```
+
+### Key Features
+
+1. **Git operations**: Clone/pull with HTTPS validation (GitHub, GitLab, Bitbucket)
+2. **Dockerfile detection**: Finds existing Dockerfile or docker-compose.yml
+3. **Claude-powered Dockerfile generation**: Auto-generates if missing
+4. **Image building**: Build Docker images via bollard
+5. **Container deployment**: Create and start containers with health checks
+6. **Dynamic routing**: Caddy reverse proxy with auto-reload
+7. **Tunnel integration**: Cloudflare Tunnel for external access
+8. **DNS management**: Auto-create DNS records via Cloudflare API
+
+### Deployment Flow
+
+```
+1. User: "deploy github.com/user/app to sixeleven.in/myapp"
+
+2. AppsManager.deploy():
+   a. Validate repo URL (HTTPS only)
+   b. Generate unique app name
+   c. Clone repo to ~/.henry/apps/<name>/
+   d. Detect Dockerfile (or generate via Claude)
+   e. Build image: docker build -t henry-app-<name>:latest
+   f. Create container on henry-apps network
+   g. Start container
+   h. Call ProxyManager.add_route(sixeleven.in, /myapp, container:8080)
+   i. Call TunnelManager.add_route(sixeleven.in, /myapp)
+   j. Persist to SQLite
+   k. Return success with URL
+
+3. User accesses https://sixeleven.in/myapp
+   → Cloudflare Tunnel → Caddy → Container
+```
+
+### Config
+
+```toml
+[proxy]
+enabled = true
+caddy_image = "caddy:2-alpine"
+caddy_container = "henry-caddy"
+http_port = 80
+https_port = 443
+config_dir = "~/.henry/caddy"
+acme_email = "you@example.com"
+network_name = "henry-apps"
+
+[apps]
+enabled = true
+workspace_dir = "~/.henry/apps"
+network_name = "henry-apps"
+auto_restart = true
+health_check_interval_secs = 30
+default_port = 8080
+max_concurrent_builds = 2
+build_timeout_secs = 600
+
+[tunnel]
+enabled = true
+tunnel_token_ref = "op://Private/Cloudflare Tunnel/token"
+api_token_ref = "op://Private/Cloudflare/api-token"
+zone_id = "your-zone-id"
+tunnel_name = "henry-tunnel"
+container_name = "henry-cloudflared"
+```
+
+### SQLite Tables
+
+```sql
+-- Apps registry
+CREATE TABLE apps (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    repo_url TEXT NOT NULL,
+    branch TEXT DEFAULT 'main',
+    domain TEXT NOT NULL,
+    path_prefix TEXT DEFAULT '/',
+    container_name TEXT NOT NULL,
+    image_name TEXT NOT NULL,
+    port INTEGER DEFAULT 8080,
+    env_vars TEXT,
+    status TEXT DEFAULT 'pending',
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_deployed TEXT
+);
+
+-- Proxy routes
+CREATE TABLE proxy_routes (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    path_prefix TEXT DEFAULT '/',
+    upstream TEXT NOT NULL,
+    strip_prefix INTEGER DEFAULT 0,
+    tls_enabled INTEGER DEFAULT 1,
+    app_id TEXT REFERENCES apps(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(domain, path_prefix)
+);
+
+-- Tunnel routes
+CREATE TABLE tunnel_routes (
+    id TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL,
+    path TEXT,
+    service TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(hostname, path)
+);
+```
+
+### Telegram Commands
+
+- `/app list` - List all deployed apps
+- `/app deploy <repo> to <domain/path>` - Deploy app
+- `/app status <name>` - App status
+- `/app logs <name> [lines]` - App logs
+- `/app stop <name>` - Stop app
+- `/app start <name>` - Start app
+- `/app remove <name>` - Remove app
+- `/app redeploy <name>` - Redeploy app
+- `/proxy status` - Proxy status
+- `/proxy routes` - List routes
+- `/tunnel status` - Tunnel status
+
+### HTTP API Endpoints
+
+```
+# Apps
+GET    /api/apps                    List all apps
+POST   /api/apps                    Deploy new app
+GET    /api/apps/{id}               Get app details
+DELETE /api/apps/{id}               Remove app
+POST   /api/apps/{id}/start         Start app
+POST   /api/apps/{id}/stop          Stop app
+POST   /api/apps/{id}/redeploy      Redeploy app
+GET    /api/apps/{id}/logs          Get app logs
+GET    /api/apps/{id}/health        Get app health
+
+# Proxy
+GET    /api/proxy/status            Proxy status
+GET    /api/proxy/routes            List routes
+POST   /api/proxy/routes            Add route
+DELETE /api/proxy/routes/{id}       Remove route
+POST   /api/proxy/reload            Reload Caddy
+
+# Tunnel
+GET    /api/tunnel/status           Tunnel status
+GET    /api/tunnel/routes           List tunnel routes
+POST   /api/tunnel/restart          Restart cloudflared
+```
+
+### Binary
+
+- Size: 14MB (release, LTO, stripped) - includes bollard, reqwest deps

@@ -34,7 +34,7 @@ cargo test -p henry-config  # Test specific crate
 
 ### Workspace Structure
 
-The project is a Cargo workspace with 16 crates in `crates/`:
+The project is a Cargo workspace with 19 crates in `crates/`:
 
 | Crate | Purpose |
 |-------|---------|
@@ -53,6 +53,9 @@ The project is a Cargo workspace with 16 crates in `crates/`:
 | `henry-maint` | Automated backups, log rotation, update checking |
 | `henry-reactive` | Observe→Decide→Execute control loop, anomaly detection |
 | `henry-agent` | ReAct pattern task execution with Claude planning |
+| `henry-proxy` | Caddy reverse proxy management, dynamic route configuration |
+| `henry-apps` | App deployment from GitHub repos, Dockerfile generation |
+| `henry-tunnel` | Cloudflare Tunnel (cloudflared) management, DNS integration |
 
 ### Key Design Patterns
 
@@ -140,7 +143,7 @@ let modules = [
 
 Secrets use 1Password CLI references (`op://vault/item/field`). See `config.example.toml` for all options.
 
-Key sections: `[daemon]`, `[network]`, `[telegram]`, `[http]`, `[containers]`, `[media]`, `[claude]`, `[maint]`, `[reactive]`, `[agent]`
+Key sections: `[daemon]`, `[network]`, `[telegram]`, `[http]`, `[containers]`, `[media]`, `[claude]`, `[maint]`, `[reactive]`, `[agent]`, `[proxy]`, `[apps]`, `[tunnel]`
 
 ## Adding New Modules
 

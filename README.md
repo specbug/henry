@@ -9,6 +9,7 @@ Henry is a unified daemon that manages all aspects of a home server:
 - **Container Management** - Start, stop, restart, and monitor Docker/Podman containers
 - **Media Server** - Control Jellyfin, trigger library scans, view active playback sessions
 - **AI Integration** - Spawn Claude Code sessions and query the Anthropic API directly
+- **App Deployment (PaaS)** - Deploy apps from GitHub repos to custom domains with automatic SSL
 - **Automated Maintenance** - Scheduled backups, log rotation, update checking
 - **Reactive Monitoring** - Automatic anomaly detection and self-healing (e.g., restart crashed containers)
 - **Agentic Tasks** - Submit complex tasks that Claude plans and executes step-by-step
@@ -165,6 +166,36 @@ planning_model = "claude-sonnet-4-20250514"
 command_allowlist = ["ls", "cat", "git", "npm", "cargo"]
 command_blocklist = ["rm -rf", "sudo", "chmod 777"]
 
+[proxy]
+enabled = false
+caddy_image = "caddy:2-alpine"
+caddy_container = "henry-caddy"
+http_port = 80
+https_port = 443
+config_dir = "~/.henry/caddy"
+# acme_email = "you@example.com"
+network_name = "henry-apps"
+
+[apps]
+enabled = false
+workspace_dir = "~/.henry/apps"
+network_name = "henry-apps"
+auto_restart = true
+health_check_interval_secs = 30
+default_port = 8080
+max_concurrent_builds = 2
+build_timeout_secs = 600
+
+[tunnel]
+enabled = false
+tunnel_token_ref = "op://Private/Cloudflare Tunnel/token"
+api_token_ref = "op://Private/Cloudflare/api-token"
+zone_id = ""
+tunnel_name = "henry-tunnel"
+container_name = "henry-cloudflared"
+container_image = "cloudflare/cloudflared:latest"
+network_name = "henry-apps"
+
 [logging]
 level = "info"
 dir = "~/.henry/logs"
@@ -314,6 +345,32 @@ Add your Telegram user ID or username to `allowed_users` / `allowed_usernames` i
 | `/agent pause` | Pause task processing |
 | `/agent resume` | Resume task processing |
 
+#### Apps (PaaS)
+
+| Command | Description |
+|---------|-------------|
+| `/app list` | List all deployed apps |
+| `/app deploy <repo> to <domain/path>` | Deploy app from GitHub |
+| `/app status <name>` | App status and health |
+| `/app logs <name> [N]` | App container logs |
+| `/app stop <name>` | Stop an app |
+| `/app start <name>` | Start an app |
+| `/app remove <name>` | Remove an app |
+| `/app redeploy <name>` | Redeploy an app |
+
+#### Proxy
+
+| Command | Description |
+|---------|-------------|
+| `/proxy status` | Caddy proxy status |
+| `/proxy routes` | List all routes |
+
+#### Tunnel
+
+| Command | Description |
+|---------|-------------|
+| `/tunnel status` | Cloudflare Tunnel status |
+
 ---
 
 ## HTTP API
@@ -437,6 +494,47 @@ curl -X POST http://localhost:18791/api/agent/tasks/abc123/input \
   -d '{"key": "confirm", "value": "yes"}'
 ```
 
+### Apps (PaaS)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/apps` | List all apps |
+| POST | `/api/apps` | Deploy new app |
+| GET | `/api/apps/{id}` | App details |
+| DELETE | `/api/apps/{id}` | Remove app |
+| POST | `/api/apps/{id}/start` | Start app |
+| POST | `/api/apps/{id}/stop` | Stop app |
+| POST | `/api/apps/{id}/redeploy` | Redeploy app |
+| GET | `/api/apps/{id}/logs` | App logs |
+| GET | `/api/apps/{id}/health` | App health |
+
+**Request bodies:**
+
+```bash
+# Deploy app
+curl -X POST http://localhost:18791/api/apps \
+  -H "Content-Type: application/json" \
+  -d '{"repo_url": "https://github.com/user/myapp", "domain": "example.com", "path_prefix": "/myapp"}'
+```
+
+### Proxy
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/proxy/status` | Proxy status |
+| GET | `/api/proxy/routes` | List routes |
+| POST | `/api/proxy/routes` | Add route |
+| DELETE | `/api/proxy/routes/{id}` | Remove route |
+| POST | `/api/proxy/reload` | Reload Caddy |
+
+### Tunnel
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/tunnel/status` | Tunnel status |
+| GET | `/api/tunnel/routes` | List tunnel routes |
+| POST | `/api/tunnel/restart` | Restart cloudflared |
+
 ---
 
 ## WebSocket
@@ -493,6 +591,9 @@ websocat ws://localhost:18791/ws
 | **maint** | Backups, log rotation, updates | `[maint]` |
 | **reactive** | Anomaly detection & auto-remediation | `[reactive]` |
 | **agent** | AI-powered task execution | `[agent]` |
+| **apps** | Deploy apps from GitHub repos | `[apps]` |
+| **proxy** | Caddy reverse proxy management | `[proxy]` |
+| **tunnel** | Cloudflare Tunnel for external access | `[tunnel]` |
 
 ### Reactive Engine
 
@@ -617,7 +718,10 @@ henry/
 │   ├── henry-claude/    # Anthropic API + Claude Code
 │   ├── henry-maint/     # Backups, log rotation, updates
 │   ├── henry-reactive/  # Anomaly detection, auto-remediation
-│   └── henry-agent/     # ReAct pattern task execution
+│   ├── henry-agent/     # ReAct pattern task execution
+│   ├── henry-apps/      # App deployment from GitHub
+│   ├── henry-proxy/     # Caddy reverse proxy management
+│   └── henry-tunnel/    # Cloudflare Tunnel management
 └── config.example.toml
 ```
 

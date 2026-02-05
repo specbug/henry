@@ -162,6 +162,56 @@ impl StateManager {
             );
 
             CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id);
+
+            -- Apps registry
+            CREATE TABLE IF NOT EXISTS apps (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                repo_url TEXT NOT NULL,
+                branch TEXT DEFAULT 'main',
+                domain TEXT NOT NULL,
+                path_prefix TEXT DEFAULT '/',
+                container_name TEXT NOT NULL,
+                image_name TEXT NOT NULL,
+                port INTEGER DEFAULT 8080,
+                env_vars TEXT,
+                status TEXT DEFAULT 'pending',
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_deployed TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_apps_name ON apps(name);
+            CREATE INDEX IF NOT EXISTS idx_apps_status ON apps(status);
+
+            -- Proxy routes
+            CREATE TABLE IF NOT EXISTS proxy_routes (
+                id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                path_prefix TEXT DEFAULT '/',
+                upstream TEXT NOT NULL,
+                strip_prefix INTEGER DEFAULT 1,
+                tls_enabled INTEGER DEFAULT 1,
+                app_id TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(domain, path_prefix)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_proxy_routes_domain ON proxy_routes(domain);
+            CREATE INDEX IF NOT EXISTS idx_proxy_routes_app ON proxy_routes(app_id);
+
+            -- Tunnel routes
+            CREATE TABLE IF NOT EXISTS tunnel_routes (
+                id TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                path TEXT,
+                service TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(hostname, path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tunnel_routes_hostname ON tunnel_routes(hostname);
             "#,
         )
         .execute(&self.pool)
@@ -534,6 +584,202 @@ impl StateManager {
 
         Ok(rows)
     }
+
+    // ===== App operations =====
+
+    /// Save an app.
+    pub async fn save_app(&self, app: &AppRecord) -> Result<(), StateError> {
+        sqlx::query(
+            r#"
+            INSERT INTO apps (id, name, repo_url, branch, domain, path_prefix, container_name, image_name, port, env_vars, status, error_message, created_at, updated_at, last_deployed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at,
+                last_deployed = excluded.last_deployed
+            "#,
+        )
+        .bind(&app.id)
+        .bind(&app.name)
+        .bind(&app.repo_url)
+        .bind(&app.branch)
+        .bind(&app.domain)
+        .bind(&app.path_prefix)
+        .bind(&app.container_name)
+        .bind(&app.image_name)
+        .bind(app.port)
+        .bind(&app.env_vars)
+        .bind(&app.status)
+        .bind(&app.error_message)
+        .bind(&app.created_at)
+        .bind(&app.updated_at)
+        .bind(&app.last_deployed)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get an app by ID.
+    pub async fn get_app(&self, id: &str) -> Result<Option<AppRecord>, StateError> {
+        let row = sqlx::query_as::<_, AppRecord>(
+            "SELECT id, name, repo_url, branch, domain, path_prefix, container_name, image_name, port, env_vars, status, error_message, created_at, updated_at, last_deployed FROM apps WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Get an app by name.
+    pub async fn get_app_by_name(&self, name: &str) -> Result<Option<AppRecord>, StateError> {
+        let row = sqlx::query_as::<_, AppRecord>(
+            "SELECT id, name, repo_url, branch, domain, path_prefix, container_name, image_name, port, env_vars, status, error_message, created_at, updated_at, last_deployed FROM apps WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Get all apps.
+    pub async fn get_apps(&self) -> Result<Vec<AppRecord>, StateError> {
+        let rows = sqlx::query_as::<_, AppRecord>(
+            "SELECT id, name, repo_url, branch, domain, path_prefix, container_name, image_name, port, env_vars, status, error_message, created_at, updated_at, last_deployed FROM apps ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Delete an app.
+    pub async fn delete_app(&self, id: &str) -> Result<bool, StateError> {
+        let result = sqlx::query("DELETE FROM apps WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ===== Proxy route operations =====
+
+    /// Save a proxy route.
+    pub async fn save_proxy_route(&self, route: &ProxyRouteRecord) -> Result<(), StateError> {
+        sqlx::query(
+            r#"
+            INSERT INTO proxy_routes (id, domain, path_prefix, upstream, strip_prefix, tls_enabled, app_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                upstream = excluded.upstream,
+                strip_prefix = excluded.strip_prefix,
+                tls_enabled = excluded.tls_enabled
+            "#,
+        )
+        .bind(&route.id)
+        .bind(&route.domain)
+        .bind(&route.path_prefix)
+        .bind(&route.upstream)
+        .bind(route.strip_prefix)
+        .bind(route.tls_enabled)
+        .bind(&route.app_id)
+        .bind(&route.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get a proxy route by ID.
+    pub async fn get_proxy_route(&self, id: &str) -> Result<Option<ProxyRouteRecord>, StateError> {
+        let row = sqlx::query_as::<_, ProxyRouteRecord>(
+            "SELECT id, domain, path_prefix, upstream, strip_prefix, tls_enabled, app_id, created_at FROM proxy_routes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Get all proxy routes.
+    pub async fn get_proxy_routes(&self) -> Result<Vec<ProxyRouteRecord>, StateError> {
+        let rows = sqlx::query_as::<_, ProxyRouteRecord>(
+            "SELECT id, domain, path_prefix, upstream, strip_prefix, tls_enabled, app_id, created_at FROM proxy_routes ORDER BY domain, path_prefix",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Delete a proxy route.
+    pub async fn delete_proxy_route(&self, id: &str) -> Result<bool, StateError> {
+        let result = sqlx::query("DELETE FROM proxy_routes WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete proxy routes by app ID.
+    pub async fn delete_proxy_routes_by_app(&self, app_id: &str) -> Result<usize, StateError> {
+        let result = sqlx::query("DELETE FROM proxy_routes WHERE app_id = ?")
+            .bind(app_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
+    // ===== Tunnel route operations =====
+
+    /// Save a tunnel route.
+    pub async fn save_tunnel_route(&self, route: &TunnelRouteRecord) -> Result<(), StateError> {
+        sqlx::query(
+            r#"
+            INSERT INTO tunnel_routes (id, hostname, path, service, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                service = excluded.service
+            "#,
+        )
+        .bind(&route.id)
+        .bind(&route.hostname)
+        .bind(&route.path)
+        .bind(&route.service)
+        .bind(&route.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get all tunnel routes.
+    pub async fn get_tunnel_routes(&self) -> Result<Vec<TunnelRouteRecord>, StateError> {
+        let rows = sqlx::query_as::<_, TunnelRouteRecord>(
+            "SELECT id, hostname, path, service, created_at FROM tunnel_routes ORDER BY hostname, path",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Delete a tunnel route.
+    pub async fn delete_tunnel_route(&self, id: &str) -> Result<bool, StateError> {
+        let result = sqlx::query("DELETE FROM tunnel_routes WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 /// Module state record.
@@ -723,6 +969,141 @@ impl TaskStepRecord {
             status: "pending".to_string(),
             iterations: None,
         }
+    }
+}
+
+/// App record for persistence.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AppRecord {
+    pub id: String,
+    pub name: String,
+    pub repo_url: String,
+    pub branch: String,
+    pub domain: String,
+    pub path_prefix: String,
+    pub container_name: String,
+    pub image_name: String,
+    pub port: i32,
+    pub env_vars: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_deployed: Option<String>,
+}
+
+impl AppRecord {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        repo_url: impl Into<String>,
+        domain: impl Into<String>,
+        path_prefix: impl Into<String>,
+        container_name: impl Into<String>,
+        image_name: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now().to_rfc3339();
+        Self {
+            id: id.into(),
+            name: name.into(),
+            repo_url: repo_url.into(),
+            branch: "main".to_string(),
+            domain: domain.into(),
+            path_prefix: path_prefix.into(),
+            container_name: container_name.into(),
+            image_name: image_name.into(),
+            port: 8080,
+            env_vars: None,
+            status: "pending".to_string(),
+            error_message: None,
+            created_at: now.clone(),
+            updated_at: now,
+            last_deployed: None,
+        }
+    }
+
+    pub fn with_branch(mut self, branch: impl Into<String>) -> Self {
+        self.branch = branch.into();
+        self
+    }
+
+    pub fn with_port(mut self, port: i32) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub fn with_env_vars(mut self, env_vars: impl Into<String>) -> Self {
+        self.env_vars = Some(env_vars.into());
+        self
+    }
+}
+
+/// Proxy route record for persistence.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ProxyRouteRecord {
+    pub id: String,
+    pub domain: String,
+    pub path_prefix: String,
+    pub upstream: String,
+    pub strip_prefix: bool,
+    pub tls_enabled: bool,
+    pub app_id: Option<String>,
+    pub created_at: String,
+}
+
+impl ProxyRouteRecord {
+    pub fn new(
+        id: impl Into<String>,
+        domain: impl Into<String>,
+        path_prefix: impl Into<String>,
+        upstream: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            domain: domain.into(),
+            path_prefix: path_prefix.into(),
+            upstream: upstream.into(),
+            strip_prefix: true,
+            tls_enabled: true,
+            app_id: None,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    pub fn with_app(mut self, app_id: impl Into<String>) -> Self {
+        self.app_id = Some(app_id.into());
+        self
+    }
+}
+
+/// Tunnel route record for persistence.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TunnelRouteRecord {
+    pub id: String,
+    pub hostname: String,
+    pub path: Option<String>,
+    pub service: String,
+    pub created_at: String,
+}
+
+impl TunnelRouteRecord {
+    pub fn new(
+        id: impl Into<String>,
+        hostname: impl Into<String>,
+        service: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            hostname: hostname.into(),
+            path: None,
+            service: service.into(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 }
 

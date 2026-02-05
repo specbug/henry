@@ -24,8 +24,12 @@ henry-claude = { workspace = true }
 henry-maint = { workspace = true }
 henry-reactive = { workspace = true }
 henry-agent = { workspace = true }
+henry-proxy = { workspace = true }
+henry-apps = { workspace = true }
+henry-tunnel = { workspace = true }
 
 tokio = { workspace = true }
+bollard = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

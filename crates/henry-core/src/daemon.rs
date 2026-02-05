@@ -1,16 +1,19 @@
 //! Main daemon implementation.
 
+use henry_agent::AgentEngine;
+use henry_apps::AppsManager;
 use henry_claude::ClaudeManager;
 use henry_config::Config;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
 use henry_maint::MaintenanceManager;
 use henry_media::MediaManager;
-use henry_agent::AgentEngine;
+use henry_proxy::ProxyManager;
 use henry_reactive::{ReactiveConfig, ReactiveEngine};
 use henry_secrets::SecretManager;
 use henry_server::ContainerManager;
 use henry_state::StateManager;
+use henry_tunnel::TunnelManager;
 use henry_tui::{ui, App, Event, EventHandler, Terminal};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,6 +62,15 @@ pub enum DaemonError {
     #[error("reactive error: {0}")]
     Reactive(#[from] henry_reactive::ReactiveError),
 
+    #[error("proxy error: {0}")]
+    Proxy(#[from] henry_proxy::ProxyError),
+
+    #[error("apps error: {0}")]
+    Apps(#[from] henry_apps::AppsError),
+
+    #[error("tunnel error: {0}")]
+    Tunnel(#[from] henry_tunnel::TunnelError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -77,6 +89,9 @@ pub struct Daemon {
     maint: Option<Arc<RwLock<MaintenanceManager>>>,
     reactive: Option<Arc<RwLock<ReactiveEngine>>>,
     agent: Option<Arc<RwLock<AgentEngine>>>,
+    proxy: Option<Arc<RwLock<ProxyManager>>>,
+    apps: Option<Arc<RwLock<AppsManager>>>,
+    tunnel: Option<Arc<RwLock<TunnelManager>>>,
     shutdown_tx: broadcast::Sender<()>,
     event_tx: broadcast::Sender<henry_http::WsEvent>,
 }
@@ -257,6 +272,112 @@ impl Daemon {
             None
         };
 
+        // Initialize proxy manager if enabled
+        let proxy = if config.proxy.enabled {
+            if let Some(ref container_mgr) = containers {
+                let mgr = container_mgr.read().await;
+                match ProxyManager::from_container_manager(config.proxy.clone(), &*mgr).await {
+                    Ok(manager) => {
+                        info!("Proxy manager initialized");
+                        Some(Arc::new(RwLock::new(manager)))
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize proxy manager: {}", e);
+                        None
+                    }
+                }
+            } else {
+                warn!("Proxy manager requires containers to be enabled");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Initialize tunnel manager if enabled
+        let tunnel = if config.tunnel.enabled {
+            if let Some(ref container_mgr) = containers {
+                // Get tunnel tokens from 1Password
+                let tunnel_token = match secrets.get(&config.tunnel.tunnel_token_ref).await {
+                    Ok(token) => Some(token),
+                    Err(e) => {
+                        warn!("Failed to get tunnel token: {}", e);
+                        None
+                    }
+                };
+
+                let api_token = match secrets.get(&config.tunnel.api_token_ref).await {
+                    Ok(token) => Some(token),
+                    Err(e) => {
+                        warn!("Failed to get Cloudflare API token: {}", e);
+                        None
+                    }
+                };
+
+                // Get Docker connection
+                let socket_url = henry_server::detect_podman_socket()
+                    .or_else(henry_server::detect_docker_socket)
+                    .unwrap_or_else(|| "unix:///var/run/docker.sock".to_string());
+
+                match bollard::Docker::connect_with_socket(&socket_url, 120, bollard::API_DEFAULT_VERSION) {
+                    Ok(docker) => {
+                        match TunnelManager::new(config.tunnel.clone(), docker, tunnel_token, api_token).await {
+                            Ok(manager) => {
+                                info!("Tunnel manager initialized");
+                                Some(Arc::new(RwLock::new(manager)))
+                            }
+                            Err(e) => {
+                                warn!("Failed to initialize tunnel manager: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to connect to Docker for tunnel: {}", e);
+                        None
+                    }
+                }
+            } else {
+                warn!("Tunnel manager requires containers to be enabled");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Initialize apps manager if enabled
+        let apps = if config.apps.enabled {
+            if let Some(ref container_mgr) = containers {
+                let mut manager = AppsManager::new(config.apps.clone(), container_mgr.clone());
+
+                // Add optional dependencies
+                if let Some(ref proxy_mgr) = proxy {
+                    manager = manager.with_proxy(proxy_mgr.clone());
+                }
+                if let Some(ref claude_mgr) = claude {
+                    manager = manager.with_claude(claude_mgr.clone());
+                }
+                manager = manager.with_state(state.clone());
+
+                // Initialize (load apps from state)
+                let manager = Arc::new(RwLock::new(manager));
+                {
+                    let mut mgr = manager.write().await;
+                    if let Err(e) = mgr.init().await {
+                        warn!("Failed to initialize apps manager: {}", e);
+                    }
+                }
+
+                info!("Apps manager initialized");
+                Some(manager)
+            } else {
+                warn!("Apps manager requires containers to be enabled");
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             config_path,
@@ -270,6 +391,9 @@ impl Daemon {
             maint,
             reactive,
             agent,
+            proxy,
+            apps,
+            tunnel,
             shutdown_tx,
             event_tx,
         })
@@ -725,6 +849,9 @@ impl Daemon {
             ("http", config.http.enabled),
             ("reactive", config.reactive.enabled),
             ("agent", config.agent.enabled),
+            ("proxy", config.proxy.enabled),
+            ("apps", config.apps.enabled),
+            ("tunnel", config.tunnel.enabled),
         ];
 
         for (name, enabled) in modules {
@@ -751,6 +878,9 @@ impl Daemon {
             ("http", self.config.http.enabled),
             ("reactive", self.config.reactive.enabled),
             ("agent", self.config.agent.enabled),
+            ("proxy", self.config.proxy.enabled),
+            ("apps", self.config.apps.enabled),
+            ("tunnel", self.config.tunnel.enabled),
         ];
 
         let health = self.health.read().await;

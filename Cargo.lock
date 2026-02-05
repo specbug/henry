@@ -1099,6 +1099,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "henry-apps"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "chrono",
+ "henry-claude",
+ "henry-config",
+ "henry-proxy",
+ "henry-server",
+ "henry-state",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "henry-claude"
 version = "0.1.0"
 dependencies = [
@@ -1132,8 +1153,10 @@ name = "henry-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bollard",
  "clap",
  "henry-agent",
+ "henry-apps",
  "henry-claude",
  "henry-config",
  "henry-health",
@@ -1141,12 +1164,14 @@ dependencies = [
  "henry-lock",
  "henry-maint",
  "henry-media",
+ "henry-proxy",
  "henry-reactive",
  "henry-secrets",
  "henry-server",
  "henry-state",
  "henry-telegram",
  "henry-tui",
+ "henry-tunnel",
  "nix",
  "thiserror 2.0.18",
  "tokio",
@@ -1241,6 +1266,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "henry-proxy"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "chrono",
+ "futures",
+ "henry-config",
+ "henry-server",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "henry-reactive"
 version = "0.1.0"
 dependencies = [
@@ -1331,6 +1374,24 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "henry-tunnel"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "chrono",
+ "henry-config",
+ "henry-server",
+ "henry-state",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

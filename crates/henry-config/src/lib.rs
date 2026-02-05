@@ -38,6 +38,12 @@ pub struct Config {
     pub reactive: ReactiveConfig,
     /// Agent task execution settings.
     pub agent: AgentConfig,
+    /// Reverse proxy settings.
+    pub proxy: ProxyConfig,
+    /// App deployment settings.
+    pub apps: AppsConfig,
+    /// Cloudflare tunnel settings.
+    pub tunnel: TunnelConfig,
 }
 
 impl Default for Config {
@@ -54,6 +60,9 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             reactive: ReactiveConfig::default(),
             agent: AgentConfig::default(),
+            proxy: ProxyConfig::default(),
+            apps: AppsConfig::default(),
+            tunnel: TunnelConfig::default(),
         }
     }
 }
@@ -505,6 +514,122 @@ impl Default for AgentSafetyConfig {
                 "file_deletion".to_string(),
                 "system_changes".to_string(),
             ],
+        }
+    }
+}
+
+/// Reverse proxy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Whether the proxy is enabled.
+    pub enabled: bool,
+    /// Caddy container image.
+    pub caddy_image: String,
+    /// Caddy container name.
+    pub caddy_container: String,
+    /// HTTP port to expose.
+    pub http_port: u16,
+    /// HTTPS port to expose.
+    pub https_port: u16,
+    /// Directory for Caddy configuration.
+    pub config_dir: PathBuf,
+    /// ACME email for Let's Encrypt.
+    pub acme_email: Option<String>,
+    /// Docker network name for the proxy.
+    pub network_name: String,
+    /// Container runtime socket path (auto-detected if None).
+    pub socket_path: Option<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            enabled: false,
+            caddy_image: "caddy:2-alpine".to_string(),
+            caddy_container: "henry-caddy".to_string(),
+            http_port: 80,
+            https_port: 443,
+            config_dir: home.join(".henry").join("caddy"),
+            acme_email: None,
+            network_name: "henry-apps".to_string(),
+            socket_path: None,
+        }
+    }
+}
+
+/// App deployment configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppsConfig {
+    /// Whether app deployment is enabled.
+    pub enabled: bool,
+    /// Directory for app workspaces.
+    pub workspace_dir: PathBuf,
+    /// Docker network name for apps.
+    pub network_name: String,
+    /// Auto-restart apps on failure.
+    pub auto_restart: bool,
+    /// Health check interval in seconds.
+    pub health_check_interval_secs: u64,
+    /// Default container port for apps.
+    pub default_port: u16,
+    /// Maximum concurrent builds.
+    pub max_concurrent_builds: usize,
+    /// Build timeout in seconds.
+    pub build_timeout_secs: u64,
+}
+
+impl Default for AppsConfig {
+    fn default() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            enabled: false,
+            workspace_dir: home.join(".henry").join("apps"),
+            network_name: "henry-apps".to_string(),
+            auto_restart: true,
+            health_check_interval_secs: 30,
+            default_port: 8080,
+            max_concurrent_builds: 2,
+            build_timeout_secs: 600,
+        }
+    }
+}
+
+/// Cloudflare tunnel configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TunnelConfig {
+    /// Whether the tunnel is enabled.
+    pub enabled: bool,
+    /// 1Password reference for tunnel token.
+    pub tunnel_token_ref: String,
+    /// 1Password reference for Cloudflare API token.
+    pub api_token_ref: String,
+    /// Cloudflare zone ID.
+    pub zone_id: String,
+    /// Tunnel name/ID.
+    pub tunnel_name: String,
+    /// cloudflared container name.
+    pub container_name: String,
+    /// cloudflared container image.
+    pub container_image: String,
+    /// Docker network name.
+    pub network_name: String,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tunnel_token_ref: "op://Private/Cloudflare Tunnel/token".to_string(),
+            api_token_ref: "op://Private/Cloudflare/api-token".to_string(),
+            zone_id: String::new(),
+            tunnel_name: "henry-tunnel".to_string(),
+            container_name: "henry-cloudflared".to_string(),
+            container_image: "cloudflare/cloudflared:latest".to_string(),
+            network_name: "henry-apps".to_string(),
         }
     }
 }

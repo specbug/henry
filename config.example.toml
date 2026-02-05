@@ -104,3 +104,76 @@ level = "info"
 dir = "~/.henry/logs"
 # Enable JSON logging for machine parsing
 json = false
+
+[reactive]
+enabled = false
+# Check interval in seconds
+check_interval_secs = 30
+# CPU usage threshold (percentage)
+cpu_threshold = 90.0
+# Memory usage threshold (percentage)
+memory_threshold = 85.0
+# Disk usage threshold (percentage)
+disk_threshold = 90.0
+# Require approval for destructive actions
+require_approval = true
+
+[agent]
+enabled = false
+# Maximum steps per task
+max_steps_per_task = 10
+# Default token budget per task
+default_token_budget = 50000
+# Auto-start task processing
+auto_start = true
+
+[proxy]
+enabled = false
+# Caddy container image
+caddy_image = "caddy:2-alpine"
+# Caddy container name
+caddy_container = "henry-caddy"
+# HTTP port to expose
+http_port = 80
+# HTTPS port to expose
+https_port = 443
+# Directory for Caddy configuration
+config_dir = "~/.henry/caddy"
+# ACME email for Let's Encrypt certificates
+# acme_email = "you@example.com"
+# Docker network for the proxy
+network_name = "henry-apps"
+
+[apps]
+enabled = false
+# Directory for app workspaces
+workspace_dir = "~/.henry/apps"
+# Docker network for apps
+network_name = "henry-apps"
+# Auto-restart apps on failure
+auto_restart = true
+# Health check interval in seconds
+health_check_interval_secs = 30
+# Default container port for apps
+default_port = 8080
+# Maximum concurrent builds
+max_concurrent_builds = 2
+# Build timeout in seconds
+build_timeout_secs = 600
+
+[tunnel]
+enabled = false
+# 1Password reference for Cloudflare tunnel token
+tunnel_token_ref = "op://Private/Cloudflare Tunnel/token"
+# 1Password reference for Cloudflare API token
+api_token_ref = "op://Private/Cloudflare/api-token"
+# Cloudflare zone ID
+zone_id = ""
+# Tunnel name/ID
+tunnel_name = "henry-tunnel"
+# cloudflared container name
+container_name = "henry-cloudflared"
+# cloudflared container image
+container_image = "cloudflare/cloudflared:latest"
+# Docker network
+network_name = "henry-apps"
