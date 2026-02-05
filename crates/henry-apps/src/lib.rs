@@ -188,23 +188,17 @@ impl AppsManager {
 
         let dockerfile_path = app_dir.join("Dockerfile");
         if !dockerfile_path.exists() {
-            // Try to generate Dockerfile using Claude
-            if let Some(ref claude) = self.claude {
-                match builder::generate_dockerfile(&app_dir, claude.clone()).await {
-                    Ok(dockerfile) => {
-                        std::fs::write(&dockerfile_path, dockerfile)?;
-                        info!("Generated Dockerfile for app: {}", app.name);
-                    }
-                    Err(e) => {
-                        app.status = AppStatus::Failed(format!("Dockerfile generation failed: {}", e));
-                        self.save_app(&app).await?;
-                        return Err(AppsError::DockerfileGeneration(e.to_string()));
-                    }
+            // Try to generate Dockerfile using Claude (API or CLI)
+            match builder::generate_dockerfile(&app_dir, self.claude.clone()).await {
+                Ok(dockerfile) => {
+                    std::fs::write(&dockerfile_path, dockerfile)?;
+                    info!("Generated Dockerfile for app: {}", app.name);
                 }
-            } else {
-                app.status = AppStatus::Failed("No Dockerfile found and Claude not available".to_string());
-                self.save_app(&app).await?;
-                return Err(AppsError::Build("No Dockerfile found".to_string()));
+                Err(e) => {
+                    app.status = AppStatus::Failed(format!("Dockerfile generation failed: {}", e));
+                    self.save_app(&app).await?;
+                    return Err(AppsError::DockerfileGeneration(e.to_string()));
+                }
             }
         }
 

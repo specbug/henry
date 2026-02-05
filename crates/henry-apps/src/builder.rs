@@ -1,6 +1,5 @@
 //! Docker image building for apps.
 
-use crate::git::{detect_project_type, ProjectType};
 use crate::AppsError;
 use henry_claude::ClaudeManager;
 use std::path::Path;
@@ -9,12 +8,13 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 /// Generate a Dockerfile using Claude AI.
+/// Tries Claude API first (if configured), then falls back to Claude CLI.
 pub async fn generate_dockerfile(
     app_dir: &Path,
-    claude: Arc<RwLock<ClaudeManager>>,
+    claude: Option<Arc<RwLock<ClaudeManager>>>,
 ) -> Result<String, AppsError> {
     // First try to detect project type and use template
-    if let Some(project_type) = detect_project_type(app_dir) {
+    if let Some(project_type) = crate::git::detect_project_type(app_dir) {
         info!("Detected project type: {:?}", project_type);
         return Ok(project_type.dockerfile_template().to_string());
     }
@@ -22,7 +22,6 @@ pub async fn generate_dockerfile(
     // Read files to understand the project
     let files_info = gather_project_info(app_dir)?;
 
-    // Ask Claude to generate a Dockerfile
     let prompt = format!(
         r#"Generate a Dockerfile for this project. The project directory contains:
 
@@ -40,13 +39,59 @@ Return ONLY the Dockerfile content, no explanations or markdown code blocks."#,
         files_info
     );
 
-    let manager = claude.read().await;
-    let response = manager
-        .ask(&prompt)
-        .await
-        .map_err(|e| AppsError::DockerfileGeneration(e.to_string()))?;
+    // Try Claude API if available
+    if let Some(ref claude_mgr) = claude {
+        let manager = claude_mgr.read().await;
+        if manager.has_api_client() {
+            info!("Using Claude API for Dockerfile generation");
+            let response = manager
+                .ask(&prompt)
+                .await
+                .map_err(|e| AppsError::DockerfileGeneration(e.to_string()))?;
+            return parse_dockerfile_response(&response);
+        }
+    }
 
-    // Clean up the response (remove any markdown formatting)
+    // Fall back to Claude CLI (works with Claude Max subscription)
+    info!("Using Claude CLI for Dockerfile generation");
+    generate_dockerfile_with_cli(&prompt).await
+}
+
+/// Generate Dockerfile using Claude CLI (no API key needed, uses session token).
+async fn generate_dockerfile_with_cli(prompt: &str) -> Result<String, AppsError> {
+    // Check if claude CLI is available
+    let check = tokio::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .await;
+
+    if check.map(|o| !o.status.success()).unwrap_or(true) {
+        return Err(AppsError::DockerfileGeneration(
+            "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code".to_string(),
+        ));
+    }
+
+    // Use claude CLI with --print flag for non-interactive output
+    let output = tokio::process::Command::new("claude")
+        .args(["--print", "-p", prompt])
+        .output()
+        .await
+        .map_err(|e| AppsError::DockerfileGeneration(format!("Failed to run claude CLI: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppsError::DockerfileGeneration(format!(
+            "Claude CLI failed: {}",
+            stderr
+        )));
+    }
+
+    let response = String::from_utf8_lossy(&output.stdout).to_string();
+    parse_dockerfile_response(&response)
+}
+
+/// Parse and validate Dockerfile from Claude response.
+fn parse_dockerfile_response(response: &str) -> Result<String, AppsError> {
     let dockerfile = response
         .trim()
         .trim_start_matches("```dockerfile")
