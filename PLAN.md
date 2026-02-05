@@ -11,29 +11,30 @@ Personal home server daemon for Mac Mini M4 Pro. Security-first, minimal Rust im
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     HENRY - Mac Mini M4 Pro                        │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐               │
-│  │ TUI         │   │ Telegram    │   │ HTTP API    │               │
-│  │ (Ratatui)   │   │ (Teloxide)  │   │ (Axum)      │               │
-│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘               │
-│         └─────────────────┼─────────────────┘                       │
-│                    ┌──────┴──────┐                                  │
-│                    │ Message Bus │                                  │
-│                    │ (Tokio MPSC)│                                  │
-│                    └──────┬──────┘                                  │
-│  ┌──────────────┬─────────┼─────────┬──────────────┐               │
-│  │              │         │         │              │               │
-│  ▼              ▼         ▼         ▼              ▼               │
-│ ┌────┐       ┌────┐    ┌────┐   ┌────┐        ┌────┐              │
-│ │Srvr│       │Mdia│    │Clde│   │Mnt │        │Hlth│              │
-│ │Mod │       │Mod │    │Mod │   │Mod │        │Mgr │              │
-│ └─┬──┘       └─┬──┘    └─┬──┘   └─┬──┘        └─┬──┘              │
-│   │            │         │        │             │                  │
-│ Podman     Jellyfin   Anthropic  Cron        Probes               │
-│            /Plex      /Claude    Backup      Alerts               │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         HENRY - Mac Mini M4 Pro                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                        │
+│  │ TUI         │   │ Telegram    │   │ HTTP API    │                        │
+│  │ (Ratatui)   │   │ (Teloxide)  │   │ (Axum)      │                        │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘                        │
+│         └─────────────────┼─────────────────┘                                │
+│                    ┌──────┴──────┐                                           │
+│                    │ Message Bus │                                           │
+│                    │ (Tokio MPSC)│                                           │
+│                    └──────┬──────┘                                           │
+│  ┌─────────┬─────────┬────┴────┬─────────┬─────────┬─────────┐              │
+│  │         │         │         │         │         │         │              │
+│  ▼         ▼         ▼         ▼         ▼         ▼         ▼              │
+│ ┌────┐  ┌────┐   ┌────┐    ┌────┐    ┌────┐   ┌────┐    ┌────┐             │
+│ │Srvr│  │Mdia│   │Clde│    │Mnt │    │Hlth│   │Rctv│    │Agnt│             │
+│ │Mod │  │Mod │   │Mod │    │Mod │    │Mgr │   │Eng │    │Eng │             │
+│ └─┬──┘  └─┬──┘   └─┬──┘    └─┬──┘    └─┬──┘   └─┬──┘    └─┬──┘             │
+│   │       │        │         │         │        │         │                 │
+│ Podman  Jellyfin Anthropic  Cron    Probes   Observe   ReAct               │
+│         /Plex    /Claude    Backup  Alerts   →Decide   Loop                │
+│                                              →Execute  Planning            │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Tech Stack
@@ -69,7 +70,9 @@ henry/
 │   ├── henry-server/             # (Phase 3) Podman container mgmt
 │   ├── henry-media/              # (Phase 4) Jellyfin/Plex
 │   ├── henry-claude/             # (Phase 5) Anthropic API + Claude Code
-│   └── henry-maint/              # (Phase 6) Updates, backup, cleanup
+│   ├── henry-maint/              # (Phase 6) Updates, backup, cleanup
+│   ├── henry-reactive/           # (Phase 7) Reactive control loop
+│   └── henry-agent/              # (Phase 8) Agentic task execution
 └── tests/
 
 Runtime (~/.henry/):
@@ -147,7 +150,7 @@ api_key_ref = "op://Private/Anthropic API/credential"
 ## Phase 2: Communication (COMPLETE)
 
 **Commit:** `177c1034f` on branch `init`
-**Completed:** 2026-02-04
+**Completed:** 2025-02-04
 
 ### Implemented Crates
 
@@ -245,7 +248,7 @@ let _ = shutdown_tx.send(());
 ## Phase 3: Containers (COMPLETE)
 
 **Commit:** `283ef05b5` on branch `init`
-**Completed:** 2026-02-04
+**Completed:** 2025-02-04
 
 ### Implemented Crate: `henry-server`
 
@@ -354,7 +357,7 @@ pub async fn run_bot(
 ## Phase 4: Media (COMPLETE)
 
 **Commit:** `a98b2f33c` on branch `init`
-**Completed:** 2026-02-05
+**Completed:** 2025-02-05
 
 ### Implemented Crate: `henry-media`
 
@@ -467,7 +470,7 @@ pub async fn run_bot(
 ## Phase 5: AI Integration (COMPLETE)
 
 **Commit:** `218c461af` on branch `init`
-**Completed:** 2026-02-05
+**Completed:** 2025-02-05
 
 ### Implemented Crate: `henry-claude`
 
@@ -584,7 +587,7 @@ pub async fn run_bot(
 ## Phase 6: Self-Maintenance (COMPLETE)
 
 **Commit:** `1633d9aa9` on branch `init`
-**Completed:** 2026-02-05
+**Completed:** 2025-02-05
 
 ### Implemented Crate: `henry-maint`
 
@@ -707,6 +710,235 @@ pub async fn run_bot(
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<(), TelegramError>
 ```
+
+---
+
+## Phase 7: Reactive Control Loop (COMPLETE)
+
+**Commit:** `e49302abb` on branch `init`
+**Completed:** 2025-02-05
+
+### Implemented Crate: `henry-reactive`
+
+**Purpose:** Continuous monitoring, anomaly detection, auto-remediation, and escalation
+
+### Directory Structure
+
+```
+crates/henry-reactive/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # ReactiveEngine, start/stop, status
+    ├── observer.rs     # AnomalyObserver, metric collection
+    ├── decision.rs     # DecisionEngine, policy matching
+    ├── action.rs       # ActionExecutor, remediation execution
+    ├── policy.rs       # RemediationPolicy, rules, cooldowns
+    └── types.rs        # Anomaly, Action, SystemEvent, Severity
+```
+
+### Control Loop Pattern
+
+```
+1. OBSERVE   → Collect metrics from HealthManager, poll container states
+2. DETECT    → Compare against thresholds, emit SystemEvents
+3. DECIDE    → Match events to policy rules, check cooldowns/rate limits
+4. EXECUTE   → Run auto-approved actions with timeout
+5. VERIFY    → Confirm fix worked (re-check metrics after delay)
+6. ESCALATE  → If failed or needs approval → notify user
+```
+
+### Key Features
+
+1. **Anomaly detection**: Disk, memory, CPU thresholds; container crashes; service unreachable
+2. **Auto-remediation**: Restart containers, rotate logs, trigger backups
+3. **Rate limiting**: Max actions per hour, max concurrent actions
+4. **Quiet hours**: Suppress non-critical actions during configurable hours
+5. **Approval workflow**: Some actions require human approval before execution
+6. **Cooldown periods**: Prevent repeated triggering of same rule
+
+### System Events
+
+| Event | Severity | Auto-action |
+|-------|----------|-------------|
+| `container_crashed` | Critical | Restart container |
+| `disk_space_low` | Warning/Critical | Rotate logs |
+| `service_unreachable` | Critical | Restart + notify |
+| `memory_pressure` | Warning/Critical | Notify user |
+| `backup_failed` | Warning | Retry backup |
+| `update_available` | Info | Notify user |
+| `container_restart_loop` | Critical | Escalate to human |
+| `high_cpu_usage` | Warning | Notify user |
+| `module_unhealthy` | Warning | Notify user |
+
+### Config
+
+```toml
+[reactive]
+enabled = true
+check_interval_secs = 10
+max_actions_per_hour = 20
+max_concurrent_actions = 3
+quiet_hours_start = 2
+quiet_hours_end = 6
+
+[reactive.thresholds]
+disk_warning_percent = 80.0
+disk_critical_percent = 95.0
+memory_warning_percent = 85.0
+memory_critical_percent = 95.0
+cpu_warning_percent = 90.0
+cpu_alert_duration_secs = 300
+
+[reactive.notifications]
+verbosity = "all"           # all, milestones, critical
+include_routine_fixes = true
+batch_interval_secs = 0     # 0 = immediate
+```
+
+### Telegram Commands
+
+- `/reactive` or `/reactive status` - Show reactive engine status
+- `/reactive pause` - Pause the control loop
+- `/reactive resume` - Resume the control loop
+- `/reactive history [N]` - Show last N actions (default: 10)
+- `/reactive anomalies` - List active anomalies
+- `/reactive pending` - Show actions awaiting approval
+- `/reactive approve <id>` - Approve a pending action
+
+### HTTP API Endpoints
+
+- `GET /api/reactive/status` - Engine status (running, paused, counts)
+- `POST /api/reactive/pause` - Pause the engine
+- `POST /api/reactive/resume` - Resume the engine
+- `GET /api/reactive/anomalies` - List active anomalies
+- `GET /api/reactive/actions` - List all actions
+- `POST /api/reactive/actions/{id}/approve` - Approve an action (body: `{"approved_by": "user"}`)
+
+### Tests
+
+24 new unit tests (119 total):
+- `henry-reactive` types: 6 tests (severity ordering, event types, anomaly lifecycle, action lifecycle)
+- `henry-reactive` policy: 6 tests (rule matching, cooldowns, quiet hours)
+- `henry-reactive` observer: 4 tests (threshold detection, metric collection)
+- `henry-reactive` decision: 4 tests (policy evaluation, rate limiting)
+- `henry-reactive` lib: 2 tests (engine creation, start/stop)
+- Integration tests in `henry-telegram` and `henry-http`
+
+---
+
+## Phase 8: Agentic Task Execution (COMPLETE)
+
+**Commit:** `e49302abb` on branch `init`
+**Completed:** 2025-02-05
+
+### Implemented Crate: `henry-agent`
+
+**Purpose:** High-level task execution using ReAct pattern (Thought → Action → Observation)
+
+### Directory Structure
+
+```
+crates/henry-agent/
+├── Cargo.toml
+└── src/
+    ├── lib.rs          # AgentEngine, task submission, lifecycle
+    ├── planner.rs      # TaskPlanner, Claude-powered step generation
+    ├── executor.rs     # ReActExecutor, step execution with retries
+    ├── evaluator.rs    # ResultEvaluator, success/failure assessment
+    ├── task.rs         # TaskQueue, persistence, priority ordering
+    └── types.rs        # Task, Step, StepType, TaskStatus, AgentState
+```
+
+### Execution Flow
+
+```
+1. SUBMIT   → Task added to priority queue, persisted to SQLite
+2. PLAN     → Claude generates execution steps from description
+3. EXECUTE  → ReAct loop: Thought → Action → Observation
+4. EVALUATE → Assess success, generate summary
+5. COMPLETE → Update status, notify user
+```
+
+### Key Features
+
+1. **Claude-powered planning**: Automatically generates steps from task description
+2. **ReAct pattern**: Each step iterates Thought → Action → Observation
+3. **Multiple step types**: Claude Code, Claude API, shell commands, container ops
+4. **Token budgeting**: Per-task token limits prevent runaway costs
+5. **User input requests**: Steps can pause for user input
+6. **Priority queue**: Critical > High > Normal > Low
+7. **Persistence**: Tasks survive daemon restarts via SQLite
+
+### Step Types
+
+| Type | Description |
+|------|-------------|
+| `ClaudeCode` | Execute Claude Code session in a workspace |
+| `ClaudeApi` | Call Claude API directly |
+| `Command` | Run a shell command |
+| `ContainerOp` | Start/stop/restart a container |
+| `UserInput` | Pause and wait for user input |
+
+### Task Lifecycle
+
+```
+Queued → Planning → Executing → Completed
+                 ↘ AwaitingInput ↗
+                 ↘ Failed
+                 ↘ Cancelled
+```
+
+### Config
+
+```toml
+[agent]
+enabled = false
+max_concurrent_tasks = 1
+max_steps_per_task = 10
+max_tokens_per_task = 50000
+max_iterations_per_step = 5
+step_timeout_secs = 300
+planning_model = "claude-sonnet-4-20250514"
+
+[agent.safety]
+command_allowlist = ["ls", "cat", "git", "npm", "cargo"]
+command_blocklist = ["rm -rf", "sudo", "chmod 777"]
+require_approval_for = ["file_deletion", "system_changes"]
+```
+
+### Telegram Commands
+
+- `/agent` or `/agent status` - Show agent status
+- `/agent new <title> - <description>` - Submit a new task
+- `/agent list` - List all tasks
+- `/agent task <id>` - Show task details and steps
+- `/agent cancel <id>` - Cancel a task
+- `/agent input <id> <key>=<value>` - Provide input for waiting task
+- `/agent pause` - Pause the agent
+- `/agent resume` - Resume the agent
+
+### HTTP API Endpoints
+
+- `GET /api/agent/status` - Agent status (state, pending count)
+- `GET /api/agent/tasks` - List all tasks
+- `POST /api/agent/tasks` - Create task (body: `{"title": "...", "description": "...", "priority": "normal"}`)
+- `GET /api/agent/tasks/{id}` - Get task details
+- `POST /api/agent/tasks/{id}/cancel` - Cancel a task
+- `POST /api/agent/tasks/{id}/input` - Provide input (body: `{"key": "...", "value": "..."}`)
+- `POST /api/agent/pause` - Pause the agent
+- `POST /api/agent/resume` - Resume the agent
+
+### Tests
+
+Tests included in Phase 7 & 8 commit:
+- `henry-agent` types: Task, Step, StepType serialization
+- `henry-agent` task: Queue operations, persistence
+- `henry-agent` executor: ReAct iteration, command safety
+- `henry-agent` planner: Step generation mocking
+
+### Binary
+
+- Size: 14MB (release, LTO, stripped) - up from 13MB due to uuid deps for task IDs
 
 ---
 
