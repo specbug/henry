@@ -34,6 +34,10 @@ pub struct Config {
     pub maint: MaintConfig,
     /// Logging settings.
     pub logging: LoggingConfig,
+    /// Reactive control loop settings.
+    pub reactive: ReactiveConfig,
+    /// Agent task execution settings.
+    pub agent: AgentConfig,
 }
 
 impl Default for Config {
@@ -48,6 +52,8 @@ impl Default for Config {
             claude: ClaudeConfig::default(),
             maint: MaintConfig::default(),
             logging: LoggingConfig::default(),
+            reactive: ReactiveConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -305,6 +311,200 @@ impl Default for MaintConfig {
             update_check_cron: "0 0 12 * * *".to_string(), // Noon daily
             github_repo: Some("specbug/henry".to_string()),
             data_dir,
+        }
+    }
+}
+
+/// Reactive control loop configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReactiveConfig {
+    /// Whether the reactive engine is enabled.
+    pub enabled: bool,
+    /// Check interval in seconds.
+    pub check_interval_secs: u64,
+    /// Maximum actions per hour.
+    pub max_actions_per_hour: u32,
+    /// Maximum concurrent actions.
+    pub max_concurrent_actions: usize,
+    /// Threshold settings.
+    pub thresholds: ReactiveThresholds,
+    /// Remediation rules.
+    pub rules: Vec<ReactiveRule>,
+    /// Notification settings.
+    pub notifications: ReactiveNotifications,
+    /// Quiet hours (start hour, end hour) in 24h format.
+    pub quiet_hours_start: u8,
+    pub quiet_hours_end: u8,
+}
+
+impl Default for ReactiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_secs: 10,
+            max_actions_per_hour: 20,
+            max_concurrent_actions: 3,
+            thresholds: ReactiveThresholds::default(),
+            rules: vec![],
+            notifications: ReactiveNotifications::default(),
+            quiet_hours_start: 2,
+            quiet_hours_end: 6,
+        }
+    }
+}
+
+/// Threshold configuration for anomaly detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReactiveThresholds {
+    /// Disk usage warning threshold (percent).
+    pub disk_warning_percent: f32,
+    /// Disk usage critical threshold (percent).
+    pub disk_critical_percent: f32,
+    /// Memory usage warning threshold (percent).
+    pub memory_warning_percent: f32,
+    /// Memory usage critical threshold (percent).
+    pub memory_critical_percent: f32,
+    /// CPU usage warning threshold (percent).
+    pub cpu_warning_percent: f32,
+    /// Duration of high CPU to trigger alert (seconds).
+    pub cpu_alert_duration_secs: u64,
+}
+
+impl Default for ReactiveThresholds {
+    fn default() -> Self {
+        Self {
+            disk_warning_percent: 80.0,
+            disk_critical_percent: 95.0,
+            memory_warning_percent: 85.0,
+            memory_critical_percent: 95.0,
+            cpu_warning_percent: 90.0,
+            cpu_alert_duration_secs: 300,
+        }
+    }
+}
+
+/// A remediation rule configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactiveRule {
+    /// Unique name for this rule.
+    pub name: String,
+    /// Event pattern to match (e.g., "container_crashed").
+    pub event_pattern: String,
+    /// Action to take (e.g., "restart_container").
+    pub action: String,
+    /// Whether this action requires human approval.
+    #[serde(default)]
+    pub requires_approval: bool,
+    /// Cooldown period after triggering (seconds).
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Maximum times this rule can trigger per day.
+    #[serde(default = "default_max_triggers")]
+    pub max_triggers_per_day: u32,
+    /// Optional pre-action to run before the main action.
+    pub pre_action: Option<String>,
+}
+
+fn default_cooldown_secs() -> u64 {
+    300
+}
+
+fn default_max_triggers() -> u32 {
+    10
+}
+
+/// Notification settings for the reactive engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReactiveNotifications {
+    /// Verbosity level: "all", "milestones", "critical".
+    pub verbosity: String,
+    /// Include routine fixes in notifications.
+    pub include_routine_fixes: bool,
+    /// Batch interval for notifications (0 = immediate).
+    pub batch_interval_secs: u64,
+}
+
+impl Default for ReactiveNotifications {
+    fn default() -> Self {
+        Self {
+            verbosity: "all".to_string(),
+            include_routine_fixes: true,
+            batch_interval_secs: 0,
+        }
+    }
+}
+
+/// Agent task execution configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Whether the agent is enabled.
+    pub enabled: bool,
+    /// Maximum concurrent tasks.
+    pub max_concurrent_tasks: usize,
+    /// Maximum steps per task.
+    pub max_steps_per_task: usize,
+    /// Maximum tokens per task.
+    pub max_tokens_per_task: u32,
+    /// Maximum iterations per step.
+    pub max_iterations_per_step: u32,
+    /// Default step timeout in seconds.
+    pub step_timeout_secs: u64,
+    /// Model to use for planning.
+    pub planning_model: String,
+    /// Safety configuration.
+    pub safety: AgentSafetyConfig,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent_tasks: 1,
+            max_steps_per_task: 10,
+            max_tokens_per_task: 50000,
+            max_iterations_per_step: 5,
+            step_timeout_secs: 300,
+            planning_model: "claude-sonnet-4-20250514".to_string(),
+            safety: AgentSafetyConfig::default(),
+        }
+    }
+}
+
+/// Safety configuration for the agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSafetyConfig {
+    /// Commands allowed to be auto-executed.
+    pub command_allowlist: Vec<String>,
+    /// Commands that are never allowed.
+    pub command_blocklist: Vec<String>,
+    /// Actions that require human approval.
+    pub require_approval_for: Vec<String>,
+}
+
+impl Default for AgentSafetyConfig {
+    fn default() -> Self {
+        Self {
+            command_allowlist: vec![
+                "ls".to_string(),
+                "cat".to_string(),
+                "git".to_string(),
+                "npm".to_string(),
+                "cargo".to_string(),
+            ],
+            command_blocklist: vec![
+                "rm -rf".to_string(),
+                "sudo".to_string(),
+                "chmod 777".to_string(),
+            ],
+            require_approval_for: vec![
+                "file_deletion".to_string(),
+                "system_changes".to_string(),
+            ],
         }
     }
 }

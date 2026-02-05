@@ -1,0 +1,27 @@
+[package]
+name = "henry-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agentic task execution for Henry daemon"
+
+[dependencies]
+# Workspace dependencies
+tokio.workspace = true
+serde.workspace = true
+serde_json = "1"
+tracing.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+# Internal crates
+henry-config.workspace = true
+henry-state.workspace = true
+henry-claude.workspace = true
+henry-server.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

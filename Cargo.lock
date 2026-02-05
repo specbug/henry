@@ -1073,6 +1073,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "henry-agent"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "henry-claude",
+ "henry-config",
+ "henry-server",
+ "henry-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "henry-claude"
 version = "0.1.0"
 dependencies = [
@@ -1107,6 +1124,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "henry-agent",
  "henry-claude",
  "henry-config",
  "henry-health",
@@ -1114,6 +1132,7 @@ dependencies = [
  "henry-lock",
  "henry-maint",
  "henry-media",
+ "henry-reactive",
  "henry-secrets",
  "henry-server",
  "henry-state",
@@ -1145,11 +1164,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "henry-agent",
  "henry-claude",
  "henry-config",
  "henry-health",
  "henry-maint",
  "henry-media",
+ "henry-reactive",
  "henry-server",
  "http 1.4.0",
  "serde",
@@ -1209,6 +1230,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "henry-reactive"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "henry-config",
+ "henry-health",
+ "henry-maint",
+ "henry-server",
+ "henry-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "henry-secrets"
 version = "0.1.0"
 dependencies = [
@@ -1251,11 +1291,13 @@ name = "henry-telegram"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "henry-agent",
  "henry-claude",
  "henry-config",
  "henry-health",
  "henry-maint",
  "henry-media",
+ "henry-reactive",
  "henry-secrets",
  "henry-server",
  "serde",

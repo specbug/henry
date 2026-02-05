@@ -6,6 +6,8 @@ use henry_health::{HealthManager, HealthStatus, ModuleHealth};
 use henry_lock::InstanceLock;
 use henry_maint::MaintenanceManager;
 use henry_media::MediaManager;
+use henry_agent::AgentEngine;
+use henry_reactive::{ReactiveConfig, ReactiveEngine};
 use henry_secrets::SecretManager;
 use henry_server::ContainerManager;
 use henry_state::StateManager;
@@ -54,6 +56,9 @@ pub enum DaemonError {
     #[error("maintenance error: {0}")]
     Maint(#[from] henry_maint::MaintError),
 
+    #[error("reactive error: {0}")]
+    Reactive(#[from] henry_reactive::ReactiveError),
+
     #[error("daemon is shutting down")]
     Shutdown,
 }
@@ -63,13 +68,15 @@ pub struct Daemon {
     config: Config,
     config_path: PathBuf,
     _lock: InstanceLock,
-    state: StateManager,
+    state: Arc<RwLock<StateManager>>,
     health: Arc<RwLock<HealthManager>>,
     secrets: SecretManager,
     containers: Option<Arc<RwLock<ContainerManager>>>,
     media: Option<Arc<RwLock<MediaManager>>>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
     maint: Option<Arc<RwLock<MaintenanceManager>>>,
+    reactive: Option<Arc<RwLock<ReactiveEngine>>>,
+    agent: Option<Arc<RwLock<AgentEngine>>>,
     shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -102,7 +109,7 @@ impl Daemon {
 
         // Initialize state database
         let db_path = config.daemon.data_dir.join("state").join("henry.db");
-        let state = StateManager::new(&db_path).await?;
+        let state = Arc::new(RwLock::new(StateManager::new(&db_path).await?));
 
         // Initialize health manager
         let health = Arc::new(RwLock::new(HealthManager::new(env!("CARGO_PKG_VERSION"))));
@@ -180,6 +187,72 @@ impl Daemon {
             None
         };
 
+        // Initialize reactive engine if enabled
+        let reactive = if config.reactive.enabled {
+            let reactive_config = ReactiveConfig {
+                enabled: config.reactive.enabled,
+                check_interval_secs: config.reactive.check_interval_secs,
+                max_actions_per_hour: config.reactive.max_actions_per_hour,
+                max_concurrent_actions: config.reactive.max_concurrent_actions,
+                thresholds: henry_reactive::ThresholdsConfig {
+                    disk_warning_percent: config.reactive.thresholds.disk_warning_percent,
+                    disk_critical_percent: config.reactive.thresholds.disk_critical_percent,
+                    memory_warning_percent: config.reactive.thresholds.memory_warning_percent,
+                    memory_critical_percent: config.reactive.thresholds.memory_critical_percent,
+                    cpu_warning_percent: config.reactive.thresholds.cpu_warning_percent,
+                    cpu_alert_duration_secs: config.reactive.thresholds.cpu_alert_duration_secs,
+                },
+                rules: config.reactive.rules.iter().map(|r| henry_reactive::policy::RemediationRule {
+                    name: r.name.clone(),
+                    event_pattern: r.event_pattern.clone(),
+                    action: r.action.clone(),
+                    min_severity: henry_reactive::Severity::Warning,
+                    requires_approval: r.requires_approval,
+                    cooldown_secs: r.cooldown_secs,
+                    max_triggers_per_day: r.max_triggers_per_day,
+                    pre_action: r.pre_action.clone(),
+                    enabled: true,
+                }).collect(),
+                notifications: henry_reactive::NotificationsConfig {
+                    verbosity: config.reactive.notifications.verbosity.clone(),
+                    include_routine_fixes: config.reactive.notifications.include_routine_fixes,
+                    batch_interval_secs: config.reactive.notifications.batch_interval_secs,
+                },
+                quiet_hours: Some((config.reactive.quiet_hours_start, config.reactive.quiet_hours_end)),
+            };
+
+            let engine = ReactiveEngine::new(
+                reactive_config,
+                health.clone(),
+                containers.clone(),
+                maint.clone(),
+            );
+            info!("Reactive engine initialized");
+            Some(Arc::new(RwLock::new(engine)))
+        } else {
+            None
+        };
+
+        // Initialize agent engine if enabled
+        let agent = if config.agent.enabled {
+            if let (Some(ref claude_mgr), Some(ref container_mgr)) = (&claude, &containers) {
+                let engine = AgentEngine::new(
+                    config.agent.clone(),
+                    state.clone(),
+                    claude_mgr.clone(),
+                    container_mgr.clone(),
+                    shutdown_tx.subscribe(),
+                );
+                info!("Agent engine initialized");
+                Some(Arc::new(RwLock::new(engine)))
+            } else {
+                warn!("Agent engine requires Claude and containers to be enabled");
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             config_path,
@@ -191,6 +264,8 @@ impl Daemon {
             media,
             claude,
             maint,
+            reactive,
+            agent,
             shutdown_tx,
         })
     }
@@ -481,6 +556,8 @@ impl Daemon {
             let media = self.media.clone();
             let claude = self.claude.clone();
             let maint = self.maint.clone();
+            let reactive = self.reactive.clone();
+            let agent_http = self.agent.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Resolve API token if configured
@@ -506,6 +583,8 @@ impl Daemon {
                     media,
                     claude,
                     maint,
+                    reactive,
+                    agent_http,
                     shutdown_rx,
                 )
                 .await
@@ -530,6 +609,8 @@ impl Daemon {
             let media = self.media.clone();
             let claude = self.claude.clone();
             let maint = self.maint.clone();
+            let reactive = self.reactive.clone();
+            let agent = self.agent.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
 
             // Get bot token from 1Password
@@ -551,7 +632,7 @@ impl Daemon {
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    henry_telegram::run_bot(token, telegram_config, health, containers, media, claude, maint, shutdown_rx)
+                    henry_telegram::run_bot(token, telegram_config, health, containers, media, claude, maint, reactive, agent, shutdown_rx)
                         .await
                 {
                     error!("Telegram bot error: {}", e);
@@ -566,6 +647,63 @@ impl Daemon {
             info!("Telegram bot started");
         }
 
+        // Start reactive engine if enabled
+        if self.config.reactive.enabled {
+            if let Some(ref reactive) = self.reactive {
+                let shutdown_rx = self.shutdown_tx.subscribe();
+                let mut engine = reactive.write().await;
+                match engine.start(shutdown_rx).await {
+                    Ok(()) => {
+                        self.health
+                            .write()
+                            .await
+                            .update_module(ModuleHealth::new("reactive").healthy())
+                            .await;
+                        info!("Reactive engine started");
+                    }
+                    Err(e) => {
+                        warn!("Failed to start reactive engine: {}", e);
+                        self.health
+                            .write()
+                            .await
+                            .update_module(
+                                ModuleHealth::new("reactive")
+                                    .unhealthy(format!("Failed to start: {}", e)),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Start agent engine if enabled
+        if self.config.agent.enabled {
+            if let Some(ref agent) = self.agent {
+                let agent_clone = agent.clone();
+                tokio::spawn(async move {
+                    let mut engine = agent_clone.write().await;
+                    if let Err(e) = engine.start().await {
+                        error!("Agent engine error: {}", e);
+                    }
+                });
+
+                self.health
+                    .write()
+                    .await
+                    .update_module(ModuleHealth::new("agent").healthy())
+                    .await;
+                info!("Agent engine started");
+            } else {
+                self.health
+                    .write()
+                    .await
+                    .update_module(
+                        ModuleHealth::new("agent").unhealthy("Agent engine not initialized"),
+                    )
+                    .await;
+            }
+        }
+
         Ok(())
     }
 
@@ -578,6 +716,8 @@ impl Daemon {
             ("maint", config.maint.enabled),
             ("telegram", config.telegram.enabled),
             ("http", config.http.enabled),
+            ("reactive", config.reactive.enabled),
+            ("agent", config.agent.enabled),
         ];
 
         for (name, enabled) in modules {
@@ -602,6 +742,8 @@ impl Daemon {
             ("maint", self.config.maint.enabled),
             ("telegram", self.config.telegram.enabled),
             ("http", self.config.http.enabled),
+            ("reactive", self.config.reactive.enabled),
+            ("agent", self.config.agent.enabled),
         ];
 
         let health = self.health.read().await;
@@ -626,7 +768,7 @@ impl Daemon {
     }
 
     /// Get the state manager.
-    pub fn state(&self) -> &StateManager {
+    pub fn state(&self) -> &Arc<RwLock<StateManager>> {
         &self.state
     }
 

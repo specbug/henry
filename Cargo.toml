@@ -14,6 +14,8 @@ members = [
     "crates/henry-media",
     "crates/henry-claude",
     "crates/henry-maint",
+    "crates/henry-reactive",
+    "crates/henry-agent",
 ]
 
 [workspace.package]
@@ -91,6 +93,8 @@ henry-server = { path = "crates/henry-server" }
 henry-media = { path = "crates/henry-media" }
 henry-claude = { path = "crates/henry-claude" }
 henry-maint = { path = "crates/henry-maint" }
+henry-reactive = { path = "crates/henry-reactive" }
+henry-agent = { path = "crates/henry-agent" }
 
 # Cron parsing
 cron = "0.15"

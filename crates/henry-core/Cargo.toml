@@ -22,6 +22,8 @@ henry-server = { workspace = true }
 henry-media = { workspace = true }
 henry-claude = { workspace = true }
 henry-maint = { workspace = true }
+henry-reactive = { workspace = true }
+henry-agent = { workspace = true }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

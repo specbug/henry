@@ -7,6 +7,8 @@ use henry_config::TelegramConfig;
 use henry_health::{format_bytes, format_duration, HealthManager, HealthStatus};
 use henry_maint::{format_backup_size, format_job, MaintenanceManager};
 use henry_media::{format_ticks, MediaManager};
+use henry_agent::AgentEngine;
+use henry_reactive::ReactiveEngine;
 use henry_server::ContainerManager;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -55,6 +57,10 @@ pub enum Command {
     Claude(String),
     #[command(description = "maintenance: status|backup|jobs|update")]
     Maint(String),
+    #[command(description = "reactive control: status|pause|resume|history|approve")]
+    Reactive(String),
+    #[command(description = "agent tasks: new|list|status|cancel|input")]
+    Agent(String),
     #[command(description = "start the bot")]
     Start,
 }
@@ -67,6 +73,8 @@ pub struct BotState {
     pub media: Option<Arc<RwLock<MediaManager>>>,
     pub claude: Option<Arc<RwLock<ClaudeManager>>>,
     pub maint: Option<Arc<RwLock<MaintenanceManager>>>,
+    pub reactive: Option<Arc<RwLock<ReactiveEngine>>>,
+    pub agent: Option<Arc<RwLock<AgentEngine>>>,
 }
 
 /// Create and run the Telegram bot.
@@ -78,6 +86,8 @@ pub async fn run_bot(
     media: Option<Arc<RwLock<MediaManager>>>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
     maint: Option<Arc<RwLock<MaintenanceManager>>>,
+    reactive: Option<Arc<RwLock<ReactiveEngine>>>,
+    agent: Option<Arc<RwLock<AgentEngine>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), TelegramError> {
     if token.is_empty() {
@@ -92,6 +102,8 @@ pub async fn run_bot(
         media,
         claude,
         maint,
+        reactive,
+        agent,
     });
 
     info!("Starting Telegram bot");
@@ -178,6 +190,8 @@ async fn handle_command(
         Command::Media(args) => handle_media_command(&state, &args).await,
         Command::Claude(args) => handle_claude_command(&state, &args).await,
         Command::Maint(args) => handle_maint_command(&state, &args).await,
+        Command::Reactive(args) => handle_reactive_command(&state, &args).await,
+        Command::Agent(args) => handle_agent_command(&state, &args).await,
     };
 
     bot.send_message(msg.chat.id, response).await?;
@@ -750,6 +764,375 @@ async fn format_maint_jobs(maint: &Arc<RwLock<MaintenanceManager>>) -> String {
     lines.join("\n")
 }
 
+async fn handle_reactive_command(state: &BotState, args: &str) -> String {
+    let Some(ref reactive) = state.reactive else {
+        return "Reactive module not enabled.".to_string();
+    };
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let action = parts.first().map(|s| s.to_lowercase());
+
+    match action.as_deref() {
+        None | Some("status") => format_reactive_status(reactive).await,
+        Some("pause") => {
+            let engine = reactive.read().await;
+            match engine.pause().await {
+                Ok(()) => "Reactive engine paused.".to_string(),
+                Err(e) => format!("Error pausing: {}", e),
+            }
+        }
+        Some("resume") => {
+            let engine = reactive.read().await;
+            match engine.resume().await {
+                Ok(()) => "Reactive engine resumed.".to_string(),
+                Err(e) => format!("Error resuming: {}", e),
+            }
+        }
+        Some("history") => {
+            let limit = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+            format_reactive_history(reactive, limit).await
+        }
+        Some("approve") => {
+            let Some(action_id) = parts.get(1) else {
+                return "Usage: /reactive approve <action_id>".to_string();
+            };
+            let engine = reactive.read().await;
+            match engine.approve_action(action_id, "telegram").await {
+                Ok(()) => format!("Action {} approved.", action_id),
+                Err(e) => format!("Error approving action: {}", e),
+            }
+        }
+        Some("anomalies") => format_reactive_anomalies(reactive).await,
+        Some("pending") => format_reactive_pending(reactive).await,
+        _ => "Usage: /reactive [status|pause|resume|history|approve|anomalies|pending]".to_string(),
+    }
+}
+
+async fn format_reactive_status(reactive: &Arc<RwLock<ReactiveEngine>>) -> String {
+    let engine = reactive.read().await;
+    let status = engine.status().await;
+
+    let mut lines = vec!["Reactive Status:".to_string()];
+    lines.push(format!(
+        "  State: {}",
+        if status.paused {
+            "paused"
+        } else if status.running {
+            "running"
+        } else {
+            "stopped"
+        }
+    ));
+
+    if let Some(started) = status.started_at {
+        lines.push(format!("  Started: {}", started.format("%Y-%m-%d %H:%M")));
+    }
+
+    lines.push(format!("  Total Checks: {}", status.total_checks));
+    lines.push(format!("  Anomalies Detected: {}", status.anomalies_detected));
+    lines.push(format!("  Actions Executed: {}", status.actions_executed));
+    lines.push(format!(
+        "  Actions This Hour: {}/20",
+        status.actions_this_hour
+    ));
+    lines.push(format!("  Active Anomalies: {}", status.active_anomalies));
+    lines.push(format!("  Pending Approvals: {}", status.pending_approvals));
+    lines.push(format!(
+        "  Quiet Hours: {}",
+        if status.in_quiet_hours { "yes" } else { "no" }
+    ));
+
+    if let Some(last) = status.last_check {
+        lines.push(format!("  Last Check: {}", last.format("%H:%M:%S")));
+    }
+
+    lines.join("\n")
+}
+
+async fn format_reactive_history(reactive: &Arc<RwLock<ReactiveEngine>>, limit: usize) -> String {
+    let engine = reactive.read().await;
+    let actions = engine.get_action_history(limit).await;
+
+    if actions.is_empty() {
+        return "No actions in history.".to_string();
+    }
+
+    let mut lines = vec!["Action History:".to_string()];
+    for action in actions {
+        let status_emoji = match action.status {
+            henry_reactive::types::ActionStatus::Completed => "OK",
+            henry_reactive::types::ActionStatus::Failed => "ERR",
+            henry_reactive::types::ActionStatus::AwaitingApproval => "WAIT",
+            henry_reactive::types::ActionStatus::Executing => "RUN",
+            _ => "?",
+        };
+        lines.push(format!(
+            "  {} {} {}",
+            status_emoji,
+            action.action_type.description(),
+            action.created_at.format("%m-%d %H:%M")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+async fn format_reactive_anomalies(reactive: &Arc<RwLock<ReactiveEngine>>) -> String {
+    let engine = reactive.read().await;
+    let anomalies = engine.get_active_anomalies().await;
+
+    if anomalies.is_empty() {
+        return "No active anomalies.".to_string();
+    }
+
+    let mut lines = vec!["Active Anomalies:".to_string()];
+    for anomaly in anomalies.iter().take(10) {
+        let severity = match anomaly.severity {
+            henry_reactive::Severity::Info => "INFO",
+            henry_reactive::Severity::Warning => "WARN",
+            henry_reactive::Severity::Critical => "CRIT",
+            henry_reactive::Severity::Emergency => "EMRG",
+        };
+        lines.push(format!(
+            "  {} {} - {}",
+            severity,
+            anomaly.event.event_type(),
+            anomaly.event.description()
+        ));
+    }
+
+    if anomalies.len() > 10 {
+        lines.push(format!("  ... and {} more", anomalies.len() - 10));
+    }
+
+    lines.join("\n")
+}
+
+async fn format_reactive_pending(reactive: &Arc<RwLock<ReactiveEngine>>) -> String {
+    let engine = reactive.read().await;
+    let actions = engine.get_pending_actions().await;
+
+    if actions.is_empty() {
+        return "No pending actions.".to_string();
+    }
+
+    let mut lines = vec!["Pending Approvals:".to_string()];
+    for action in actions {
+        lines.push(format!(
+            "  [{}] {} - {}",
+            &action.id[..8],
+            action.action_type.description(),
+            action.created_at.format("%m-%d %H:%M")
+        ));
+    }
+    lines.push("\nUse /reactive approve <id> to approve.".to_string());
+
+    lines.join("\n")
+}
+
+async fn handle_agent_command(state: &BotState, args: &str) -> String {
+    let Some(ref agent) = state.agent else {
+        return "Agent module not enabled.".to_string();
+    };
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let action = parts.first().map(|s| s.to_lowercase());
+
+    match action.as_deref() {
+        None | Some("status") => format_agent_status(agent).await,
+        Some("new") => {
+            // Expect: /agent new <title> - <description>
+            let rest = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if rest.is_empty() {
+                return "Usage: /agent new <title> - <description>".to_string();
+            }
+
+            let (title, description) = if let Some(idx) = rest.find(" - ") {
+                (rest[..idx].to_string(), rest[idx + 3..].to_string())
+            } else {
+                (rest.clone(), rest)
+            };
+
+            let mut engine = agent.write().await;
+            match engine.submit_task(title, description, "telegram".to_string()).await {
+                Ok(task_id) => format!("Task created: {}", &task_id[..8]),
+                Err(e) => format!("Error creating task: {}", e),
+            }
+        }
+        Some("list") => format_agent_tasks(agent).await,
+        Some("task") | Some("get") => {
+            let Some(task_id) = parts.get(1) else {
+                return "Usage: /agent task <task_id>".to_string();
+            };
+            format_agent_task(agent, task_id).await
+        }
+        Some("cancel") => {
+            let Some(task_id) = parts.get(1) else {
+                return "Usage: /agent cancel <task_id>".to_string();
+            };
+            let mut engine = agent.write().await;
+            match engine.cancel_task(&task_id.to_string()).await {
+                Ok(()) => format!("Task {} cancelled.", task_id),
+                Err(e) => format!("Error cancelling task: {}", e),
+            }
+        }
+        Some("input") => {
+            // Expect: /agent input <task_id> <key>=<value>
+            let Some(task_id) = parts.get(1) else {
+                return "Usage: /agent input <task_id> <key>=<value>".to_string();
+            };
+            let rest = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+            let Some((key, value)) = rest.split_once('=') else {
+                return "Usage: /agent input <task_id> <key>=<value>".to_string();
+            };
+            let mut engine = agent.write().await;
+            match engine
+                .provide_input(&task_id.to_string(), key.to_string(), value.to_string())
+                .await
+            {
+                Ok(()) => format!("Input provided for task {}.", task_id),
+                Err(e) => format!("Error providing input: {}", e),
+            }
+        }
+        Some("pause") => {
+            let mut engine = agent.write().await;
+            engine.pause();
+            "Agent engine paused.".to_string()
+        }
+        Some("resume") => {
+            let mut engine = agent.write().await;
+            engine.resume();
+            "Agent engine resumed.".to_string()
+        }
+        _ => "Usage: /agent [status|new|list|task|cancel|input|pause|resume]".to_string(),
+    }
+}
+
+async fn format_agent_status(agent: &Arc<RwLock<AgentEngine>>) -> String {
+    let engine = agent.read().await;
+
+    let state_str = match engine.state() {
+        henry_agent::types::AgentState::Idle => "idle",
+        henry_agent::types::AgentState::Processing => "processing",
+        henry_agent::types::AgentState::Paused => "paused",
+    };
+
+    let pending = engine.pending_count();
+
+    let mut lines = vec!["Agent Status:".to_string()];
+    lines.push(format!("  State: {}", state_str));
+    lines.push(format!("  Pending Tasks: {}", pending));
+    lines.push(format!("  Enabled: {}", engine.is_enabled()));
+
+    lines.join("\n")
+}
+
+async fn format_agent_tasks(agent: &Arc<RwLock<AgentEngine>>) -> String {
+    let engine = agent.read().await;
+    let tasks = engine.list_tasks(None);
+
+    if tasks.is_empty() {
+        return "No tasks.".to_string();
+    }
+
+    let mut lines = vec!["Tasks:".to_string()];
+    for task in tasks.iter().take(10) {
+        let status = match task.status {
+            henry_agent::types::TaskStatus::Queued => "WAIT",
+            henry_agent::types::TaskStatus::Planning => "PLAN",
+            henry_agent::types::TaskStatus::Executing => "RUN",
+            henry_agent::types::TaskStatus::AwaitingInput => "INPUT",
+            henry_agent::types::TaskStatus::Completed => "OK",
+            henry_agent::types::TaskStatus::Failed => "ERR",
+            henry_agent::types::TaskStatus::Cancelled => "X",
+        };
+        lines.push(format!(
+            "  {} [{}] {}",
+            status,
+            &task.id[..8],
+            truncate_str(&task.title, 40)
+        ));
+    }
+
+    if tasks.len() > 10 {
+        lines.push(format!("  ... and {} more", tasks.len() - 10));
+    }
+
+    lines.join("\n")
+}
+
+async fn format_agent_task(agent: &Arc<RwLock<AgentEngine>>, task_id: &str) -> String {
+    let engine = agent.read().await;
+
+    // Try to find task by prefix match
+    let tasks = engine.list_tasks(None);
+    let task = tasks.iter().find(|t| t.id.starts_with(task_id));
+
+    let Some(task) = task else {
+        return format!("Task {} not found.", task_id);
+    };
+
+    let status = match task.status {
+        henry_agent::types::TaskStatus::Queued => "queued",
+        henry_agent::types::TaskStatus::Planning => "planning",
+        henry_agent::types::TaskStatus::Executing => "executing",
+        henry_agent::types::TaskStatus::AwaitingInput => "awaiting input",
+        henry_agent::types::TaskStatus::Completed => "completed",
+        henry_agent::types::TaskStatus::Failed => "failed",
+        henry_agent::types::TaskStatus::Cancelled => "cancelled",
+    };
+
+    let mut lines = vec![format!("Task: {}", task.title)];
+    lines.push(format!("  ID: {}", &task.id[..8]));
+    lines.push(format!("  Status: {}", status));
+    lines.push(format!(
+        "  Progress: {}/{}",
+        task.current_step_index,
+        task.steps.len()
+    ));
+    lines.push(format!(
+        "  Tokens: {}/{}",
+        task.tokens_used, task.token_budget
+    ));
+    lines.push(format!(
+        "  Created: {}",
+        task.created_at.format("%Y-%m-%d %H:%M")
+    ));
+
+    if !task.steps.is_empty() {
+        lines.push("  Steps:".to_string());
+        for (i, step) in task.steps.iter().take(5).enumerate() {
+            let step_status = match step.status {
+                henry_agent::types::StepStatus::Pending => "-",
+                henry_agent::types::StepStatus::Running => ">",
+                henry_agent::types::StepStatus::Completed => "OK",
+                henry_agent::types::StepStatus::Failed => "X",
+                henry_agent::types::StepStatus::Skipped => "~",
+            };
+            lines.push(format!(
+                "    {} {} {}",
+                step_status,
+                i + 1,
+                truncate_str(&step.description, 30)
+            ));
+        }
+    }
+
+    if let Some(ref result) = task.result {
+        lines.push(format!("  Result: {}", truncate_str(&result.summary, 100)));
+    }
+
+    lines.join("\n")
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,5 +1143,6 @@ mod tests {
         assert!(desc.contains("help"));
         assert!(desc.contains("status"));
         assert!(desc.contains("media"));
+        assert!(desc.contains("reactive"));
     }
 }

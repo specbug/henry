@@ -1,0 +1,26 @@
+[package]
+name = "henry-reactive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reactive control loop for Henry daemon"
+
+[dependencies]
+henry-health = { path = "../henry-health" }
+henry-server = { path = "../henry-server" }
+henry-state = { path = "../henry-state" }
+henry-config = { path = "../henry-config" }
+henry-maint = { path = "../henry-maint" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

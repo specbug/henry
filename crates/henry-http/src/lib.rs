@@ -15,6 +15,8 @@ use henry_config::HttpConfig;
 use henry_health::{HealthManager, HealthStatus, ModuleHealth, SystemMetrics};
 use henry_maint::{BackupInfo, MaintStatus, MaintenanceManager, ScheduledJob, UpdateInfo};
 use henry_media::{MediaLibrary, MediaManager, MediaStatus, PlaybackSession};
+use henry_agent::AgentEngine;
+use henry_reactive::{ReactiveEngine, ReactiveStatus};
 use henry_server::{ContainerInfo, ContainerManager};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -47,6 +49,8 @@ pub struct AppState {
     pub media: Option<Arc<RwLock<MediaManager>>>,
     pub claude: Option<Arc<RwLock<ClaudeManager>>>,
     pub maint: Option<Arc<RwLock<MaintenanceManager>>>,
+    pub reactive: Option<Arc<RwLock<ReactiveEngine>>>,
+    pub agent: Option<Arc<RwLock<AgentEngine>>>,
 }
 
 /// Health check response.
@@ -100,6 +104,8 @@ pub async fn run_server(
     media: Option<Arc<RwLock<MediaManager>>>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
     maint: Option<Arc<RwLock<MaintenanceManager>>>,
+    reactive: Option<Arc<RwLock<ReactiveEngine>>>,
+    agent: Option<Arc<RwLock<AgentEngine>>>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), HttpError> {
     let state = AppState {
@@ -110,6 +116,8 @@ pub async fn run_server(
         media,
         claude,
         maint,
+        reactive,
+        agent,
     };
 
     let app = create_router(state);
@@ -176,7 +184,23 @@ pub fn create_router(state: AppState) -> Router {
         .route("/maint/backups/{name}", axum::routing::delete(handle_maint_delete_backup))
         .route("/maint/jobs", get(handle_maint_jobs))
         .route("/maint/rotate", post(handle_maint_rotate_logs))
-        .route("/maint/update-check", post(handle_maint_update_check));
+        .route("/maint/update-check", post(handle_maint_update_check))
+        // Reactive endpoints
+        .route("/reactive/status", get(handle_reactive_status))
+        .route("/reactive/pause", post(handle_reactive_pause))
+        .route("/reactive/resume", post(handle_reactive_resume))
+        .route("/reactive/anomalies", get(handle_reactive_anomalies))
+        .route("/reactive/actions", get(handle_reactive_actions))
+        .route("/reactive/actions/{id}/approve", post(handle_reactive_approve))
+        // Agent endpoints
+        .route("/agent/status", get(handle_agent_status))
+        .route("/agent/tasks", get(handle_agent_tasks))
+        .route("/agent/tasks", post(handle_agent_create_task))
+        .route("/agent/tasks/{id}", get(handle_agent_get_task))
+        .route("/agent/tasks/{id}/cancel", post(handle_agent_cancel_task))
+        .route("/agent/tasks/{id}/input", post(handle_agent_input))
+        .route("/agent/pause", post(handle_agent_pause))
+        .route("/agent/resume", post(handle_agent_resume));
 
     // Apply auth middleware if token is configured
     let api_routes = if state.api_token.is_some() {
@@ -904,6 +928,510 @@ async fn handle_maint_update_check(
     }
 }
 
+// Reactive response types
+#[derive(Serialize)]
+pub struct ReactiveActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct ReactiveAnomaliesResponse {
+    pub anomalies: Vec<AnomalyInfo>,
+}
+
+#[derive(Serialize)]
+pub struct AnomalyInfo {
+    pub id: String,
+    pub event_type: String,
+    pub description: String,
+    pub severity: String,
+    pub detected_at: String,
+    pub resolved: bool,
+}
+
+#[derive(Serialize)]
+pub struct ReactiveActionsResponse {
+    pub actions: Vec<ActionInfo>,
+}
+
+#[derive(Serialize)]
+pub struct ActionInfo {
+    pub id: String,
+    pub anomaly_id: String,
+    pub action_type: String,
+    pub description: String,
+    pub status: String,
+    pub created_at: String,
+    pub requires_approval: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ApproveRequest {
+    pub approved_by: Option<String>,
+}
+
+async fn handle_reactive_status(
+    State(state): State<AppState>,
+) -> Result<Json<ReactiveStatus>, (StatusCode, String)> {
+    let Some(ref reactive) = state.reactive else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reactive module not enabled".to_string(),
+        ));
+    };
+
+    let engine = reactive.read().await;
+    Ok(Json(engine.status().await))
+}
+
+async fn handle_reactive_pause(
+    State(state): State<AppState>,
+) -> Result<Json<ReactiveActionResponse>, (StatusCode, String)> {
+    let Some(ref reactive) = state.reactive else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reactive module not enabled".to_string(),
+        ));
+    };
+
+    let engine = reactive.read().await;
+    match engine.pause().await {
+        Ok(()) => Ok(Json(ReactiveActionResponse {
+            success: true,
+            message: "Reactive engine paused".to_string(),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_reactive_resume(
+    State(state): State<AppState>,
+) -> Result<Json<ReactiveActionResponse>, (StatusCode, String)> {
+    let Some(ref reactive) = state.reactive else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reactive module not enabled".to_string(),
+        ));
+    };
+
+    let engine = reactive.read().await;
+    match engine.resume().await {
+        Ok(()) => Ok(Json(ReactiveActionResponse {
+            success: true,
+            message: "Reactive engine resumed".to_string(),
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_reactive_anomalies(
+    State(state): State<AppState>,
+) -> Result<Json<ReactiveAnomaliesResponse>, (StatusCode, String)> {
+    let Some(ref reactive) = state.reactive else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reactive module not enabled".to_string(),
+        ));
+    };
+
+    let engine = reactive.read().await;
+    let anomalies = engine.get_anomalies().await;
+
+    let anomaly_infos: Vec<AnomalyInfo> = anomalies
+        .into_iter()
+        .map(|a| {
+            let resolved = a.is_resolved();
+            AnomalyInfo {
+                id: a.id,
+                event_type: a.event.event_type().to_string(),
+                description: a.event.description(),
+                severity: a.severity.to_string(),
+                detected_at: a.detected_at.to_rfc3339(),
+                resolved,
+            }
+        })
+        .collect();
+
+    Ok(Json(ReactiveAnomaliesResponse {
+        anomalies: anomaly_infos,
+    }))
+}
+
+async fn handle_reactive_actions(
+    State(state): State<AppState>,
+) -> Result<Json<ReactiveActionsResponse>, (StatusCode, String)> {
+    let Some(ref reactive) = state.reactive else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reactive module not enabled".to_string(),
+        ));
+    };
+
+    let engine = reactive.read().await;
+    let actions = engine.get_actions().await;
+
+    let action_infos: Vec<ActionInfo> = actions
+        .into_iter()
+        .map(|a| ActionInfo {
+            id: a.id,
+            anomaly_id: a.anomaly_id,
+            action_type: a.action_type.action_type().to_string(),
+            description: a.action_type.description(),
+            status: a.status.to_string(),
+            created_at: a.created_at.to_rfc3339(),
+            requires_approval: a.requires_approval,
+        })
+        .collect();
+
+    Ok(Json(ReactiveActionsResponse {
+        actions: action_infos,
+    }))
+}
+
+async fn handle_reactive_approve(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ApproveRequest>,
+) -> Result<Json<ReactiveActionResponse>, (StatusCode, String)> {
+    let Some(ref reactive) = state.reactive else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reactive module not enabled".to_string(),
+        ));
+    };
+
+    let approved_by = request.approved_by.unwrap_or_else(|| "api".to_string());
+    let engine = reactive.read().await;
+    match engine.approve_action(&id, &approved_by).await {
+        Ok(()) => Ok(Json(ReactiveActionResponse {
+            success: true,
+            message: format!("Action {} approved", id),
+        })),
+        Err(henry_reactive::ReactiveError::ActionNotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("Action not found: {}", id)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// ===== Agent endpoints =====
+
+#[derive(Serialize)]
+pub struct AgentStatusResponse {
+    pub state: String,
+    pub pending_tasks: usize,
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct AgentTasksResponse {
+    pub tasks: Vec<AgentTaskInfo>,
+}
+
+#[derive(Serialize)]
+pub struct AgentTaskInfo {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+    pub progress: String,
+    pub tokens_used: u32,
+    pub token_budget: u32,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct AgentTaskDetailResponse {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub priority: String,
+    pub progress: String,
+    pub steps: Vec<AgentStepInfo>,
+    pub tokens_used: u32,
+    pub token_budget: u32,
+    pub created_at: String,
+    pub created_by: String,
+    pub result: Option<AgentTaskResultInfo>,
+}
+
+#[derive(Serialize)]
+pub struct AgentStepInfo {
+    pub id: String,
+    pub description: String,
+    pub status: String,
+    pub iterations: usize,
+    pub tokens_used: u32,
+}
+
+#[derive(Serialize)]
+pub struct AgentTaskResultInfo {
+    pub success: bool,
+    pub summary: String,
+    pub tokens_used: u32,
+    pub duration_secs: u64,
+}
+
+#[derive(Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CreateTaskResponse {
+    pub success: bool,
+    pub task_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct TaskInputRequest {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Serialize)]
+pub struct AgentActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+async fn handle_agent_status(
+    State(state): State<AppState>,
+) -> Result<Json<AgentStatusResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let engine = agent.read().await;
+    let state_str = match engine.state() {
+        henry_agent::types::AgentState::Idle => "idle",
+        henry_agent::types::AgentState::Processing => "processing",
+        henry_agent::types::AgentState::Paused => "paused",
+    };
+
+    Ok(Json(AgentStatusResponse {
+        state: state_str.to_string(),
+        pending_tasks: engine.pending_count(),
+        enabled: engine.is_enabled(),
+    }))
+}
+
+async fn handle_agent_tasks(
+    State(state): State<AppState>,
+) -> Result<Json<AgentTasksResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let engine = agent.read().await;
+    let tasks = engine.list_tasks(None);
+
+    let task_infos: Vec<AgentTaskInfo> = tasks
+        .into_iter()
+        .map(|t| AgentTaskInfo {
+            id: t.id.clone(),
+            title: t.title.clone(),
+            status: t.status.to_string(),
+            priority: t.priority.to_string(),
+            progress: format!("{}/{}", t.current_step_index, t.steps.len()),
+            tokens_used: t.tokens_used,
+            token_budget: t.token_budget,
+            created_at: t.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(AgentTasksResponse { tasks: task_infos }))
+}
+
+async fn handle_agent_create_task(
+    State(state): State<AppState>,
+    Json(request): Json<CreateTaskRequest>,
+) -> Result<Json<CreateTaskResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let mut engine = agent.write().await;
+
+    let result = if let Some(priority_str) = request.priority {
+        let priority = match priority_str.to_lowercase().as_str() {
+            "low" => henry_agent::types::TaskPriority::Low,
+            "high" => henry_agent::types::TaskPriority::High,
+            "critical" => henry_agent::types::TaskPriority::Critical,
+            _ => henry_agent::types::TaskPriority::Normal,
+        };
+        engine
+            .submit_task_with_priority(
+                request.title,
+                request.description,
+                "api".to_string(),
+                priority,
+            )
+            .await
+    } else {
+        engine
+            .submit_task(request.title, request.description, "api".to_string())
+            .await
+    };
+
+    match result {
+        Ok(task_id) => Ok(Json(CreateTaskResponse {
+            success: true,
+            task_id,
+        })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn handle_agent_get_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AgentTaskDetailResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let engine = agent.read().await;
+
+    // Find task by ID or prefix
+    let tasks = engine.list_tasks(None);
+    let task = tasks.iter().find(|t| t.id == id || t.id.starts_with(&id));
+
+    let Some(task) = task else {
+        return Err((StatusCode::NOT_FOUND, format!("Task not found: {}", id)));
+    };
+
+    let steps: Vec<AgentStepInfo> = task
+        .steps
+        .iter()
+        .map(|s| AgentStepInfo {
+            id: s.id.clone(),
+            description: s.description.clone(),
+            status: s.status.to_string(),
+            iterations: s.iterations.len(),
+            tokens_used: s.tokens_used,
+        })
+        .collect();
+
+    let result = task.result.as_ref().map(|r| AgentTaskResultInfo {
+        success: r.success,
+        summary: r.summary.clone(),
+        tokens_used: r.tokens_used,
+        duration_secs: r.duration_secs,
+    });
+
+    Ok(Json(AgentTaskDetailResponse {
+        id: task.id.clone(),
+        title: task.title.clone(),
+        description: task.description.clone(),
+        status: task.status.to_string(),
+        priority: task.priority.to_string(),
+        progress: format!("{}/{}", task.current_step_index, task.steps.len()),
+        steps,
+        tokens_used: task.tokens_used,
+        token_budget: task.token_budget,
+        created_at: task.created_at.to_rfc3339(),
+        created_by: task.created_by.clone(),
+        result,
+    }))
+}
+
+async fn handle_agent_cancel_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AgentActionResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let mut engine = agent.write().await;
+    match engine.cancel_task(&id).await {
+        Ok(()) => Ok(Json(AgentActionResponse {
+            success: true,
+            message: format!("Task {} cancelled", id),
+        })),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+async fn handle_agent_input(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<TaskInputRequest>,
+) -> Result<Json<AgentActionResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let mut engine = agent.write().await;
+    match engine.provide_input(&id, request.key, request.value).await {
+        Ok(()) => Ok(Json(AgentActionResponse {
+            success: true,
+            message: format!("Input provided for task {}", id),
+        })),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+async fn handle_agent_pause(
+    State(state): State<AppState>,
+) -> Result<Json<AgentActionResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let mut engine = agent.write().await;
+    engine.pause();
+    Ok(Json(AgentActionResponse {
+        success: true,
+        message: "Agent engine paused".to_string(),
+    }))
+}
+
+async fn handle_agent_resume(
+    State(state): State<AppState>,
+) -> Result<Json<AgentActionResponse>, (StatusCode, String)> {
+    let Some(ref agent) = state.agent else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent module not enabled".to_string(),
+        ));
+    };
+
+    let mut engine = agent.write().await;
+    engine.resume();
+    Ok(Json(AgentActionResponse {
+        success: true,
+        message: "Agent engine resumed".to_string(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,6 +1448,8 @@ mod tests {
             media: None,
             claude: None,
             maint: None,
+            reactive: None,
+            agent: None,
         }
     }
 
