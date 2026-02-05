@@ -103,16 +103,23 @@ op item create --category=login --title="Anthropic API" credential=YOUR_API_KEY
 
 ### 6. Start the Service
 
+Henry has a built-in install command that manages the LaunchAgent for you:
+
 ```bash
-# Load and start
-launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
+# Install as LaunchAgent (auto-starts on login, auto-restarts on crash)
+henry install
 
 # Verify
-henry status
+henry status    # Shows "LaunchAgent: installed and running (PID xxx)"
 launchctl list | grep henry
 
 # View logs
-tail -f ~/.henry/logs/launchd-stdout.log
+tail -f ~/.henry/logs/henry.stdout.log
+```
+
+Or manually:
+```bash
+launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
 ```
 
 ### 7. (Optional) Tailscale Remote Access
@@ -137,36 +144,36 @@ https://macmini.<your-tailnet>.ts.net/
 ## Service Management
 
 ```bash
-# Start
-launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
+# Install / Start (preferred)
+henry install                 # Installs LaunchAgent, starts immediately
+henry install --force         # Reinstall if already present
 
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.henry.daemon.plist
-
-# Restart
-launchctl unload ~/Library/LaunchAgents/com.henry.daemon.plist
-launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
+# Uninstall / Stop
+henry uninstall               # Stops and removes LaunchAgent
 
 # Check status
-launchctl list | grep henry
-henry status
+henry status                  # Shows LaunchAgent status + daemon PID
 
 # View logs
-tail -f ~/.henry/logs/launchd-stdout.log
-tail -f ~/.henry/logs/launchd-stderr.log
+tail -f ~/.henry/logs/henry.stdout.log
+tail -f ~/.henry/logs/henry.stderr.log
+
+# Manual launchctl (if needed)
+launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
+launchctl unload ~/Library/LaunchAgents/com.henry.daemon.plist
 ```
 
 ## Updating Henry
 
 ```bash
 # Stop service
-launchctl unload ~/Library/LaunchAgents/com.henry.daemon.plist
+henry uninstall
 
 # Replace binary
 sudo cp ~/henry-new /usr/local/bin/henry
 
 # Start service
-launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
+henry install
 ```
 
 ## Troubleshooting

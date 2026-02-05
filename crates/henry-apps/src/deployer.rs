@@ -1,39 +1,91 @@
 //! Container deployment for apps.
 
-use crate::types::App;
+use crate::types::{App, Service};
 use crate::AppsError;
 use henry_config::AppsConfig;
 use henry_server::ContainerManager;
 use std::collections::HashMap;
 use tracing::{debug, info};
 
-/// Deploy a container for an app.
+/// Deploy a container for an app (legacy single-service).
 pub async fn deploy_container(
     app: &App,
     _containers: &ContainerManager,
     config: &AppsConfig,
 ) -> Result<(), AppsError> {
+    deploy_container_inner(
+        &app.container_name,
+        &app.image_name,
+        &app.id,
+        &app.name,
+        None,
+        app.port,
+        &app.env_vars,
+        &HashMap::new(),
+        config,
+    )
+    .await
+}
+
+/// Deploy a container for a specific service within a multi-service app.
+pub async fn deploy_service_container(
+    app_name: &str,
+    app_id: &str,
+    service: &Service,
+    extra_env: &HashMap<String, String>,
+    config: &AppsConfig,
+) -> Result<(), AppsError> {
+    deploy_container_inner(
+        &service.container_name,
+        &service.image_name,
+        app_id,
+        app_name,
+        Some(&service.name),
+        service.port,
+        &service.env_vars,
+        extra_env,
+        config,
+    )
+    .await
+}
+
+/// Internal container deployment.
+async fn deploy_container_inner(
+    container_name: &str,
+    image_name: &str,
+    app_id: &str,
+    app_name: &str,
+    service_name: Option<&str>,
+    port: u16,
+    env_vars: &HashMap<String, String>,
+    extra_env: &HashMap<String, String>,
+    config: &AppsConfig,
+) -> Result<(), AppsError> {
     info!(
         "Deploying container {} from image {}",
-        app.container_name, app.image_name
+        container_name, image_name
     );
 
     // Build environment variables
-    let mut env_vars: Vec<String> = app
-        .env_vars
+    let mut env_list: Vec<String> = env_vars
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
+    // Add extra env vars (inter-service wiring)
+    for (k, v) in extra_env {
+        env_list.push(format!("{}={}", k, v));
+    }
+
     // Add default PORT env var
-    env_vars.push(format!("PORT={}", app.port));
+    env_list.push(format!("PORT={}", port));
 
     // Use docker CLI for container creation
     let mut args = vec![
         "run".to_string(),
         "-d".to_string(),
         "--name".to_string(),
-        app.container_name.clone(),
+        container_name.to_string(),
         "--network".to_string(),
         config.network_name.clone(),
         "--restart".to_string(),
@@ -47,20 +99,27 @@ pub async fn deploy_container(
     // Add labels
     args.extend([
         "--label".to_string(),
-        format!("henry.app.id={}", app.id),
+        format!("henry.app.id={}", app_id),
         "--label".to_string(),
-        format!("henry.app.name={}", app.name),
+        format!("henry.app.name={}", app_name),
         "--label".to_string(),
         "henry.managed=true".to_string(),
     ]);
 
+    if let Some(sn) = service_name {
+        args.extend([
+            "--label".to_string(),
+            format!("henry.service.name={}", sn),
+        ]);
+    }
+
     // Add environment variables
-    for env in &env_vars {
+    for env in &env_list {
         args.extend(["-e".to_string(), env.clone()]);
     }
 
     // Add image name
-    args.push(app.image_name.clone());
+    args.push(image_name.to_string());
 
     debug!("Docker run args: {:?}", args);
 
@@ -75,8 +134,8 @@ pub async fn deploy_container(
 
         // Check if container already exists
         if stderr.contains("is already in use") {
-            info!("Container {} already exists, restarting", app.container_name);
-            return restart_container(&app.container_name).await;
+            info!("Container {} already exists, restarting", container_name);
+            return restart_container(container_name).await;
         }
 
         return Err(AppsError::Deploy(format!(
@@ -85,7 +144,7 @@ pub async fn deploy_container(
         )));
     }
 
-    info!("Container {} deployed successfully", app.container_name);
+    info!("Container {} deployed successfully", container_name);
     Ok(())
 }
 

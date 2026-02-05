@@ -14,7 +14,7 @@ cargo build              # Debug build
 cargo build --release    # Release build (14MB, LTO + stripped)
 
 # Test
-cargo test               # Run all tests (~120 tests)
+cargo test               # Run all tests (~153 tests)
 cargo test -p henry-config  # Test specific crate
 
 # Run
@@ -24,6 +24,13 @@ cargo test -p henry-config  # Test specific crate
 ./target/release/henry check            # Validate configuration
 ./target/release/henry init             # Generate config.toml
 ./target/release/henry info             # Show version and features
+./target/release/henry install          # Install as macOS LaunchAgent
+./target/release/henry uninstall        # Uninstall LaunchAgent
+
+# Deploy apps
+./target/release/henry deploy https://github.com/user/repo --domain example.com --path /app
+./target/release/henry apps             # List deployed apps
+./target/release/henry logs myapp --service api  # Service-specific logs
 
 # With options
 ./target/release/henry --config path/to/config.toml run
@@ -34,11 +41,11 @@ cargo test -p henry-config  # Test specific crate
 
 ### Workspace Structure
 
-The project is a Cargo workspace with 19 crates in `crates/`:
+The project is a Cargo workspace with 18 crates in `crates/`:
 
 | Crate | Purpose |
 |-------|---------|
-| `henry-core` | Main binary, daemon loop, CLI (clap), signal handling |
+| `henry-core` | Main binary, daemon loop, CLI (clap), signal handling, launchd integration |
 | `henry-config` | TOML configuration parsing, hot reload via notify |
 | `henry-lock` | Single-instance locking (port binding + PID file) |
 | `henry-secrets` | 1Password CLI (`op://`) secret resolution |
@@ -54,7 +61,7 @@ The project is a Cargo workspace with 19 crates in `crates/`:
 | `henry-reactive` | Observe→Decide→Execute control loop, anomaly detection |
 | `henry-agent` | ReAct pattern task execution with Claude planning |
 | `henry-proxy` | Caddy reverse proxy management, dynamic route configuration |
-| `henry-apps` | App deployment from GitHub repos, Dockerfile generation |
+| `henry-apps` | Multi-service app deployment from GitHub repos, Claude-powered repo analysis, Dockerfile generation |
 | `henry-tunnel` | Cloudflare Tunnel (cloudflared) management, DNS integration |
 
 ### Key Design Patterns

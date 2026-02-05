@@ -4,6 +4,40 @@ Session-by-session implementation details for context continuity.
 
 ---
 
+## Session: 2026-02-06 - Multi-Service Deploy + launchd
+
+### What Was Built
+
+**Phase 11: Multi-Service App Deployment + launchd Daemon**
+
+Enabled Henry to deploy multi-service apps (monorepos with frontend + backend) from a single `henry deploy` command, with automatic service discovery, inter-service networking, and Caddy proxy routing. Added built-in macOS LaunchAgent management.
+
+### Key Changes
+
+1. **Data Model** - `Service` and `ServiceType` structs, `app_services` SQLite table
+2. **Repo Analyzer** - Claude-powered monorepo analysis (`analyzer.rs`)
+3. **Subdirectory Builds** - `builder.rs` supports `service_dir` for monorepo services
+4. **Multi-Service Deploy** - Rewrote `deploy()` with per-service build/deploy/proxy
+5. **Inter-Service Env** - Auto-generates `SERVICE_{NAME}_URL` and `API_URL`
+6. **CLI** - `--path` flag, `--service` for logs, `install`/`uninstall` commands
+7. **launchd** - `launchd.rs` module with plist generation, install/uninstall
+8. **Dynamic Allowlist** - `add_to_allowlist()`/`remove_from_allowlist()` on ContainerManager
+
+### Files Created
+- `crates/henry-apps/src/analyzer.rs`
+- `crates/henry-core/src/launchd.rs`
+
+### Files Modified
+- `crates/henry-apps/src/types.rs`, `lib.rs`, `builder.rs`, `deployer.rs`
+- `crates/henry-state/src/lib.rs`
+- `crates/henry-core/src/main.rs`, `lib.rs`
+- `crates/henry-server/src/lib.rs`
+
+### Tests
+- 153 total (up from ~120), 0 failures
+
+---
+
 ## Session: 2026-02-05 - Phase 6 Complete
 
 ### What Was Built

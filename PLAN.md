@@ -1299,3 +1299,87 @@ POST   /api/tunnel/restart          Restart cloudflared
 ### Binary
 
 - Size: 14MB (release, LTO, stripped) - includes bollard, reqwest deps
+
+---
+
+## Phase 11: Multi-Service App Deployment + launchd Daemon (COMPLETE)
+
+**Branch:** `impro`
+**Completed:** 2026-02-06
+
+### Purpose
+
+Enable Henry to autonomously deploy, host, and manage multi-service apps (e.g., a React frontend + Python backend) from a single `henry deploy` command, and run as a macOS background daemon via built-in launchd integration.
+
+### Target UX
+
+```bash
+henry deploy https://github.com/specbug/odyssey --domain sixeleven.in --path /app/odyssey
+henry install   # Run as macOS LaunchAgent (survives terminal close, auto-starts on login)
+```
+
+### What Was Built
+
+#### Multi-Service Data Model (Phase 1)
+- `Service` struct and `ServiceType` enum in `henry-apps/src/types.rs`
+- `App` gains `services: Vec<Service>` with backwards-compatible constructors
+- `app_services` table in SQLite with full CRUD via `AppServiceRecord`
+
+#### Builder Subdirectory Support (Phase 2)
+- `generate_dockerfile()` and `build_image()` accept `service_dir: Option<&str>` for monorepo builds
+- Docker build context uses repo root with `-f service_dir/Dockerfile`
+
+#### Claude-Powered Repo Analyzer (Phase 3)
+- New `henry-apps/src/analyzer.rs` module
+- Detects monorepo patterns (`apps/`, `packages/`, `services/` directories)
+- Claude API/CLI analysis for service discovery (with heuristic fallback)
+- Returns `AppManifest` with `Vec<ServiceManifest>`
+
+#### Multi-Service Deploy Flow (Phase 4)
+- `deploy()` rewritten: analyze → build each service → deploy with inter-service env → proxy routes
+- `compute_inter_service_env()` generates `SERVICE_{NAME}_URL` and `API_URL`
+- `deploy_service_container()` with Docker labels for `henry.service.name`
+- `stop()`, `start()`, `remove()`, `redeploy()` iterate all services
+
+#### CLI Updates (Phase 5)
+- `Deploy` command gains `--path` flag, `--port` becomes optional
+- `Logs` command gains `--service` flag for per-service logs
+- New `Install` and `Uninstall` commands
+- Multi-service output formatting in deploy and list
+
+#### macOS launchd Integration (Phase 6)
+- New `henry-core/src/launchd.rs` module
+- Plist generation, install/uninstall via `launchctl`
+- Status detection with PID parsing
+- `henry status` shows LaunchAgent status on macOS
+
+#### Dynamic Container Allowlist (Phase 7)
+- `add_to_allowlist()` / `remove_from_allowlist()` on `ContainerManager`
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `crates/henry-apps/src/analyzer.rs` | Claude-powered repo analysis for multi-service detection |
+| `crates/henry-core/src/launchd.rs` | macOS LaunchAgent management |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `crates/henry-apps/src/types.rs` | Added `Service`, `ServiceType`, `ServiceInfo`, updated `App` and `AppInfo` |
+| `crates/henry-apps/src/lib.rs` | Rewrote `deploy()`, added `service_logs()`, `save_services()`, `compute_inter_service_env()` |
+| `crates/henry-apps/src/builder.rs` | `service_dir` parameter for subdirectory builds |
+| `crates/henry-apps/src/deployer.rs` | `deploy_service_container()`, service-aware labels |
+| `crates/henry-state/src/lib.rs` | `app_services` table, `AppServiceRecord`, CRUD methods |
+| `crates/henry-core/src/main.rs` | `--path`, `--service`, `install`/`uninstall` commands |
+| `crates/henry-core/src/lib.rs` | Added `pub mod launchd` |
+| `crates/henry-server/src/lib.rs` | Dynamic allowlist methods |
+
+### Tests
+
+153 tests passing (up from ~120):
+- `henry-apps`: 15 tests (analyzer, builder, deployer, types, inter-service env)
+- `henry-core`: 4 tests (launchd plist generation, status display)
+- `henry-state`: 3 tests (module state, kv store, audit log)
+- `henry-server`: 10 tests (allowlist, socket detection, secret filtering)

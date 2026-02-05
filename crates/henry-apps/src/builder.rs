@@ -9,23 +9,45 @@ use tracing::{debug, info};
 
 /// Generate a Dockerfile using Claude AI.
 /// Tries Claude API first (if configured), then falls back to Claude CLI.
+///
+/// `service_dir`: Optional subdirectory relative to repo root for monorepo services.
+/// When set, detection and file gathering happen in the subdirectory, and the
+/// Claude prompt includes monorepo-aware instructions.
 pub async fn generate_dockerfile(
-    app_dir: &Path,
+    repo_dir: &Path,
+    service_dir: Option<&str>,
     claude: Option<Arc<RwLock<ClaudeManager>>>,
 ) -> Result<String, AppsError> {
+    let target_dir = match service_dir {
+        Some(sd) => repo_dir.join(sd),
+        None => repo_dir.to_path_buf(),
+    };
+
     // First try to detect project type and use template
-    if let Some(project_type) = crate::git::detect_project_type(app_dir) {
+    if let Some(project_type) = crate::git::detect_project_type(&target_dir) {
         info!("Detected project type: {:?}", project_type);
         return Ok(project_type.dockerfile_template().to_string());
     }
 
     // Read files to understand the project
-    let files_info = gather_project_info(app_dir)?;
+    let files_info = gather_project_info(&target_dir)?;
+
+    let monorepo_context = if let Some(sd) = service_dir {
+        format!(
+            "\n\nIMPORTANT: This is a monorepo. The service is located at: {}/\n\
+             Docker build context is the REPO ROOT. All COPY paths must be relative to repo root.\n\
+             Example: COPY {}/requirements.txt ./requirements.txt\n\
+             Example: COPY {}/package.json ./package.json\n",
+            sd, sd, sd
+        )
+    } else {
+        String::new()
+    };
 
     let prompt = format!(
         r#"Generate a Dockerfile for this project. The project directory contains:
 
-{}
+{}{}
 
 Requirements:
 1. Use multi-stage builds where appropriate
@@ -36,7 +58,7 @@ Requirements:
 6. Follow security best practices
 
 Return ONLY the Dockerfile content, no explanations or markdown code blocks."#,
-        files_info
+        files_info, monorepo_context
     );
 
     // Try Claude API if available
@@ -173,20 +195,36 @@ fn truncate_content(content: &str, max_len: usize) -> String {
 }
 
 /// Build a Docker image from a directory.
+///
+/// `service_dir`: Optional subdirectory for monorepo services. When set, the Dockerfile
+/// is expected at `{service_dir}/Dockerfile` and the build context is the repo root.
 pub async fn build_image(
-    app_dir: &Path,
+    repo_dir: &Path,
+    service_dir: Option<&str>,
     image_name: &str,
     _containers: &henry_server::ContainerManager,
 ) -> Result<(), AppsError> {
-    info!("Building image {} from {}", image_name, app_dir.display());
+    info!("Building image {} from {}", image_name, repo_dir.display());
 
-    // Use docker/podman CLI for building since bollard's build API is complex
-    let output = tokio::process::Command::new("docker")
-        .current_dir(app_dir)
-        .args(["build", "-t", image_name, "."])
-        .output()
-        .await
-        .map_err(|e| AppsError::Build(format!("Failed to execute docker build: {}", e)))?;
+    let output = match service_dir {
+        Some(sd) => {
+            let dockerfile_path = format!("{}/Dockerfile", sd);
+            info!("Using Dockerfile at {} with repo root as build context", dockerfile_path);
+            tokio::process::Command::new("docker")
+                .current_dir(repo_dir)
+                .args(["build", "-t", image_name, "-f", &dockerfile_path, "."])
+                .output()
+                .await
+        }
+        None => {
+            tokio::process::Command::new("docker")
+                .current_dir(repo_dir)
+                .args(["build", "-t", image_name, "."])
+                .output()
+                .await
+        }
+    }
+    .map_err(|e| AppsError::Build(format!("Failed to execute docker build: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
