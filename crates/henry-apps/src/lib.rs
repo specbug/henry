@@ -222,8 +222,8 @@ impl AppsManager {
             })
             .collect();
 
-        // Ensure Docker network exists
-        deployer::ensure_network(&self.config.network_name).await?;
+        // Ensure container network exists
+        deployer::ensure_network(&self.config.network_name, self.config.runtime_cmd()).await?;
 
         // Build phase
         app.status = AppStatus::Building;
@@ -265,7 +265,7 @@ impl AppsManager {
 
             // Build image
             let containers = self.containers.read().await;
-            if let Err(e) = builder::build_image(&app_dir, service_dir, &svc.image_name, &containers).await {
+            if let Err(e) = builder::build_image(&app_dir, service_dir, &svc.image_name, &containers, self.config.runtime_cmd()).await {
                 svc.status = AppStatus::Failed(format!("Build failed: {}", e));
                 app.status = AppStatus::Failed(format!("Build failed for service {}: {}", svc.name, e));
                 app.services = services;
@@ -415,8 +415,9 @@ impl AppsManager {
         let app = self.get_app_by_name(name).await?;
 
         // Stop and remove all service containers
+        let cmd = self.config.runtime_cmd();
         for container_name in app.all_container_names() {
-            deployer::remove_container(&container_name).await.ok();
+            deployer::remove_container(&container_name, cmd).await.ok();
         }
 
         // Remove proxy routes
@@ -459,14 +460,15 @@ impl AppsManager {
 
         // Rebuild and restart each service
         let containers = self.containers.read().await;
+        let cmd = self.config.runtime_cmd();
         for svc in &app.services {
-            builder::build_image(&app_dir, svc.build_context.as_deref(), &svc.image_name, &containers).await?;
+            builder::build_image(&app_dir, svc.build_context.as_deref(), &svc.image_name, &containers, cmd).await?;
             containers.restart(&svc.container_name).await?;
         }
 
         // If no services (legacy single-container), use old path
         if app.services.is_empty() {
-            builder::build_image(&app_dir, None, &app.image_name, &containers).await?;
+            builder::build_image(&app_dir, None, &app.image_name, &containers, cmd).await?;
             containers.restart(&app.container_name).await?;
         }
         drop(containers);

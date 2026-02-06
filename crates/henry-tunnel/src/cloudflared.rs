@@ -4,8 +4,8 @@ use crate::TunnelError;
 use tracing::{debug, info};
 
 /// Get cloudflared logs from container.
-pub async fn get_logs(container_name: &str, tail: usize) -> Result<String, TunnelError> {
-    let output = tokio::process::Command::new("docker")
+pub async fn get_logs(container_name: &str, tail: usize, runtime_cmd: &str) -> Result<String, TunnelError> {
+    let output = tokio::process::Command::new(runtime_cmd)
         .args(["logs", "--tail", &tail.to_string(), container_name])
         .output()
         .await
@@ -26,8 +26,8 @@ pub async fn get_logs(container_name: &str, tail: usize) -> Result<String, Tunne
 }
 
 /// Check if cloudflared is healthy.
-pub async fn check_health(container_name: &str) -> Result<bool, TunnelError> {
-    let output = tokio::process::Command::new("docker")
+pub async fn check_health(container_name: &str, runtime_cmd: &str) -> Result<bool, TunnelError> {
+    let output = tokio::process::Command::new(runtime_cmd)
         .args([
             "inspect",
             "--format",
@@ -47,8 +47,8 @@ pub async fn check_health(container_name: &str) -> Result<bool, TunnelError> {
 }
 
 /// Get tunnel connection status from logs.
-pub async fn get_connection_status(container_name: &str) -> Result<TunnelConnectionStatus, TunnelError> {
-    let logs = get_logs(container_name, 50).await?;
+pub async fn get_connection_status(container_name: &str, runtime_cmd: &str) -> Result<TunnelConnectionStatus, TunnelError> {
+    let logs = get_logs(container_name, 50, runtime_cmd).await?;
 
     let connected = logs.contains("Connection") && logs.contains("registered");
     let reconnecting = logs.contains("Retrying") || logs.contains("reconnect");

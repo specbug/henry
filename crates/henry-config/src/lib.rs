@@ -565,6 +565,8 @@ impl Default for ProxyConfig {
 pub struct AppsConfig {
     /// Whether app deployment is enabled.
     pub enabled: bool,
+    /// Use Podman instead of Docker.
+    pub use_podman: bool,
     /// Directory for app workspaces.
     pub workspace_dir: PathBuf,
     /// Docker network name for apps.
@@ -586,6 +588,7 @@ impl Default for AppsConfig {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self {
             enabled: false,
+            use_podman: true,
             workspace_dir: home.join(".henry").join("apps"),
             network_name: "henry-apps".to_string(),
             auto_restart: true,
@@ -597,12 +600,21 @@ impl Default for AppsConfig {
     }
 }
 
+impl AppsConfig {
+    /// Get the container runtime CLI command.
+    pub fn runtime_cmd(&self) -> &'static str {
+        if self.use_podman { "podman" } else { "docker" }
+    }
+}
+
 /// Cloudflare tunnel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TunnelConfig {
     /// Whether the tunnel is enabled.
     pub enabled: bool,
+    /// Use Podman instead of Docker.
+    pub use_podman: bool,
     /// 1Password reference for tunnel token.
     pub tunnel_token_ref: String,
     /// 1Password reference for Cloudflare API token.
@@ -623,6 +635,7 @@ impl Default for TunnelConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            use_podman: true,
             tunnel_token_ref: "op://Private/Cloudflare Tunnel/token".to_string(),
             api_token_ref: "op://Private/Cloudflare/api-token".to_string(),
             zone_id: String::new(),
@@ -631,6 +644,13 @@ impl Default for TunnelConfig {
             container_image: "cloudflare/cloudflared:latest".to_string(),
             network_name: "henry-apps".to_string(),
         }
+    }
+}
+
+impl TunnelConfig {
+    /// Get the container runtime CLI command.
+    pub fn runtime_cmd(&self) -> &'static str {
+        if self.use_podman { "podman" } else { "docker" }
     }
 }
 

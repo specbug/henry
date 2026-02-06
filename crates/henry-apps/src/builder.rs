@@ -26,7 +26,12 @@ pub async fn generate_dockerfile(
     // First try to detect project type and use template
     if let Some(project_type) = crate::git::detect_project_type(&target_dir) {
         info!("Detected project type: {:?}", project_type);
-        return Ok(project_type.dockerfile_template().to_string());
+        let template = project_type.dockerfile_template().to_string();
+        // For monorepo services, rewrite COPY/ADD paths since build context is repo root
+        if let Some(sd) = service_dir {
+            return Ok(rewrite_dockerfile_paths(&template, sd));
+        }
+        return Ok(template);
     }
 
     // Read files to understand the project
@@ -185,6 +190,64 @@ fn gather_project_info(app_dir: &Path) -> Result<String, AppsError> {
     Ok(info.join("\n\n"))
 }
 
+/// Rewrite COPY/ADD source paths in a Dockerfile to prepend the service directory.
+/// Used for monorepo services where the build context is the repo root but the
+/// Dockerfile template assumes sources are in the current directory.
+fn rewrite_dockerfile_paths(dockerfile: &str, service_dir: &str) -> String {
+    let sd = service_dir.trim_end_matches('/');
+    dockerfile
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let is_copy = trimmed.starts_with("COPY ");
+            let is_add = trimmed.starts_with("ADD ");
+
+            if !is_copy && !is_add {
+                return line.to_string();
+            }
+
+            // Skip --from=builder style multi-stage copies
+            if trimmed.contains("--from=") {
+                return line.to_string();
+            }
+
+            let prefix = if is_copy { "COPY " } else { "ADD " };
+            let rest = trimmed.strip_prefix(prefix).unwrap();
+
+            // Split into parts; last part is destination
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() < 2 {
+                return line.to_string();
+            }
+
+            let dest = parts.last().unwrap();
+            let sources = &parts[..parts.len() - 1];
+
+            let new_sources: Vec<String> = sources
+                .iter()
+                .map(|src| {
+                    // Skip sources that start with -- (flags like --chown)
+                    if src.starts_with("--") {
+                        return src.to_string();
+                    }
+                    // Don't rewrite absolute paths or already-prefixed paths
+                    if src.starts_with('/') || src.starts_with(sd) {
+                        return src.to_string();
+                    }
+                    // "." or "./" means copy the whole service dir
+                    if *src == "." || *src == "./" {
+                        return format!("{}/", sd);
+                    }
+                    format!("{}/{}", sd, src)
+                })
+                .collect();
+
+            format!("{}{} {}", prefix, new_sources.join(" "), dest)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Truncate content to a maximum length.
 fn truncate_content(content: &str, max_len: usize) -> String {
     if content.len() <= max_len {
@@ -194,7 +257,7 @@ fn truncate_content(content: &str, max_len: usize) -> String {
     }
 }
 
-/// Build a Docker image from a directory.
+/// Build a container image from a directory.
 ///
 /// `service_dir`: Optional subdirectory for monorepo services. When set, the Dockerfile
 /// is expected at `{service_dir}/Dockerfile` and the build context is the repo root.
@@ -203,6 +266,7 @@ pub async fn build_image(
     service_dir: Option<&str>,
     image_name: &str,
     _containers: &henry_server::ContainerManager,
+    runtime_cmd: &str,
 ) -> Result<(), AppsError> {
     info!("Building image {} from {}", image_name, repo_dir.display());
 
@@ -210,25 +274,25 @@ pub async fn build_image(
         Some(sd) => {
             let dockerfile_path = format!("{}/Dockerfile", sd);
             info!("Using Dockerfile at {} with repo root as build context", dockerfile_path);
-            tokio::process::Command::new("docker")
+            tokio::process::Command::new(runtime_cmd)
                 .current_dir(repo_dir)
                 .args(["build", "-t", image_name, "-f", &dockerfile_path, "."])
                 .output()
                 .await
         }
         None => {
-            tokio::process::Command::new("docker")
+            tokio::process::Command::new(runtime_cmd)
                 .current_dir(repo_dir)
                 .args(["build", "-t", image_name, "."])
                 .output()
                 .await
         }
     }
-    .map_err(|e| AppsError::Build(format!("Failed to execute docker build: {}", e)))?;
+    .map_err(|e| AppsError::Build(format!("Failed to execute {} build: {}", runtime_cmd, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppsError::Build(format!("Docker build failed: {}", stderr)));
+        return Err(AppsError::Build(format!("{} build failed: {}", runtime_cmd, stderr)));
     }
 
     debug!("Image {} built successfully", image_name);
@@ -236,8 +300,8 @@ pub async fn build_image(
 }
 
 /// Check if an image exists locally.
-pub async fn image_exists(image_name: &str) -> bool {
-    let output = tokio::process::Command::new("docker")
+pub async fn image_exists(image_name: &str, runtime_cmd: &str) -> bool {
+    let output = tokio::process::Command::new(runtime_cmd)
         .args(["image", "inspect", image_name])
         .output()
         .await;
@@ -253,5 +317,42 @@ mod tests {
     fn test_truncate_content() {
         assert_eq!(truncate_content("hello", 10), "hello");
         assert_eq!(truncate_content("hello world", 5), "hello...(truncated)");
+    }
+
+    #[test]
+    fn test_rewrite_dockerfile_paths() {
+        let template = "\
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+CMD [\"python\", \"app.py\"]";
+
+        let result = rewrite_dockerfile_paths(template, "apps/api");
+        assert!(result.contains("COPY apps/api/requirements.txt ."));
+        assert!(result.contains("COPY apps/api/ ."));
+        assert!(result.contains("FROM python:3.12-slim"));
+        assert!(result.contains("RUN pip install"));
+    }
+
+    #[test]
+    fn test_rewrite_dockerfile_paths_multistage() {
+        let template = "\
+FROM rust:1.75 AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+RUN cargo build --release
+FROM debian:bookworm-slim
+COPY --from=builder /app/target/release/myapp /usr/local/bin/";
+
+        let result = rewrite_dockerfile_paths(template, "services/backend");
+        assert!(result.contains("COPY services/backend/Cargo.toml services/backend/Cargo.lock ./"));
+        assert!(result.contains("COPY services/backend/src/ ./src/"));
+        // --from= copies should NOT be rewritten
+        assert!(result.contains("COPY --from=builder /app/target/release/myapp /usr/local/bin/"));
     }
 }

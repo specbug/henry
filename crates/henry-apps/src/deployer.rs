@@ -61,6 +61,7 @@ async fn deploy_container_inner(
     extra_env: &HashMap<String, String>,
     config: &AppsConfig,
 ) -> Result<(), AppsError> {
+    let cmd = config.runtime_cmd();
     info!(
         "Deploying container {} from image {}",
         container_name, image_name
@@ -80,7 +81,7 @@ async fn deploy_container_inner(
     // Add default PORT env var
     env_list.push(format!("PORT={}", port));
 
-    // Use docker CLI for container creation
+    // Use container CLI for container creation
     let mut args = vec![
         "run".to_string(),
         "-d".to_string(),
@@ -121,13 +122,13 @@ async fn deploy_container_inner(
     // Add image name
     args.push(image_name.to_string());
 
-    debug!("Docker run args: {:?}", args);
+    debug!("{} run args: {:?}", cmd, args);
 
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new(cmd)
         .args(&args)
         .output()
         .await
-        .map_err(|e| AppsError::Deploy(format!("Failed to execute docker run: {}", e)))?;
+        .map_err(|e| AppsError::Deploy(format!("Failed to execute {} run: {}", cmd, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -135,12 +136,12 @@ async fn deploy_container_inner(
         // Check if container already exists
         if stderr.contains("is already in use") {
             info!("Container {} already exists, restarting", container_name);
-            return restart_container(container_name).await;
+            return restart_container(container_name, cmd).await;
         }
 
         return Err(AppsError::Deploy(format!(
-            "Docker run failed: {}",
-            stderr
+            "{} run failed: {}",
+            cmd, stderr
         )));
     }
 
@@ -149,8 +150,8 @@ async fn deploy_container_inner(
 }
 
 /// Restart a container.
-async fn restart_container(name: &str) -> Result<(), AppsError> {
-    let output = tokio::process::Command::new("docker")
+async fn restart_container(name: &str, cmd: &str) -> Result<(), AppsError> {
+    let output = tokio::process::Command::new(cmd)
         .args(["restart", name])
         .output()
         .await
@@ -159,8 +160,8 @@ async fn restart_container(name: &str) -> Result<(), AppsError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppsError::Deploy(format!(
-            "Docker restart failed: {}",
-            stderr
+            "{} restart failed: {}",
+            cmd, stderr
         )));
     }
 
@@ -168,8 +169,8 @@ async fn restart_container(name: &str) -> Result<(), AppsError> {
 }
 
 /// Stop a container.
-pub async fn stop_container(name: &str) -> Result<(), AppsError> {
-    let output = tokio::process::Command::new("docker")
+pub async fn stop_container(name: &str, cmd: &str) -> Result<(), AppsError> {
+    let output = tokio::process::Command::new(cmd)
         .args(["stop", name])
         .output()
         .await
@@ -177,18 +178,18 @@ pub async fn stop_container(name: &str) -> Result<(), AppsError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppsError::Deploy(format!("Docker stop failed: {}", stderr)));
+        return Err(AppsError::Deploy(format!("{} stop failed: {}", cmd, stderr)));
     }
 
     Ok(())
 }
 
 /// Remove a container.
-pub async fn remove_container(name: &str) -> Result<(), AppsError> {
+pub async fn remove_container(name: &str, cmd: &str) -> Result<(), AppsError> {
     // Stop first
-    stop_container(name).await.ok();
+    stop_container(name, cmd).await.ok();
 
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new(cmd)
         .args(["rm", "-f", name])
         .output()
         .await
@@ -196,16 +197,16 @@ pub async fn remove_container(name: &str) -> Result<(), AppsError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppsError::Deploy(format!("Docker rm failed: {}", stderr)));
+        return Err(AppsError::Deploy(format!("{} rm failed: {}", cmd, stderr)));
     }
 
     Ok(())
 }
 
-/// Ensure the Docker network exists.
-pub async fn ensure_network(network_name: &str) -> Result<(), AppsError> {
+/// Ensure the container network exists.
+pub async fn ensure_network(network_name: &str, cmd: &str) -> Result<(), AppsError> {
     // Check if network exists
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new(cmd)
         .args(["network", "inspect", network_name])
         .output()
         .await
@@ -216,8 +217,8 @@ pub async fn ensure_network(network_name: &str) -> Result<(), AppsError> {
     }
 
     // Create network
-    info!("Creating Docker network: {}", network_name);
-    let output = tokio::process::Command::new("docker")
+    info!("Creating container network: {}", network_name);
+    let output = tokio::process::Command::new(cmd)
         .args(["network", "create", network_name])
         .output()
         .await
@@ -226,7 +227,7 @@ pub async fn ensure_network(network_name: &str) -> Result<(), AppsError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppsError::Deploy(format!(
-            "Docker network create failed: {}",
+            "Network create failed: {}",
             stderr
         )));
     }
@@ -235,8 +236,8 @@ pub async fn ensure_network(network_name: &str) -> Result<(), AppsError> {
 }
 
 /// Get container health status.
-pub async fn get_container_health(name: &str) -> Result<ContainerHealth, AppsError> {
-    let output = tokio::process::Command::new("docker")
+pub async fn get_container_health(name: &str, cmd: &str) -> Result<ContainerHealth, AppsError> {
+    let output = tokio::process::Command::new(cmd)
         .args([
             "inspect",
             "--format",
@@ -279,7 +280,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_nonexistent_container_health() {
-        let health = get_container_health("nonexistent-container-xyz").await.unwrap();
+        let cmd = if cfg!(target_os = "macos") { "podman" } else { "docker" };
+        let health = get_container_health("nonexistent-container-xyz", cmd).await.unwrap();
         assert!(!health.running);
     }
 }
