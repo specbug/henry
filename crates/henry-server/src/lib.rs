@@ -86,6 +86,18 @@ impl ContainerManager {
         Err(ContainerError::NoSocket)
     }
 
+    /// Dynamically add a container name to the allowlist.
+    pub fn add_to_allowlist(&mut self, name: &str) {
+        if !self.config.allowed_containers.contains(&name.to_string()) {
+            self.config.allowed_containers.push(name.to_string());
+        }
+    }
+
+    /// Dynamically remove a container name from the allowlist.
+    pub fn remove_from_allowlist(&mut self, name: &str) {
+        self.config.allowed_containers.retain(|n| n != name && n != &format!("/{}", name));
+    }
+
     /// Check if a container is in the allowlist.
     fn is_allowed(&self, name: &str) -> bool {
         if self.config.allowed_containers.is_empty() {

@@ -212,6 +212,27 @@ impl StateManager {
             );
 
             CREATE INDEX IF NOT EXISTS idx_tunnel_routes_hostname ON tunnel_routes(hostname);
+
+            -- App services (multi-service support)
+            CREATE TABLE IF NOT EXISTS app_services (
+                id TEXT PRIMARY KEY,
+                app_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                service_type TEXT DEFAULT 'other',
+                build_context TEXT,
+                container_name TEXT NOT NULL,
+                image_name TEXT NOT NULL,
+                port INTEGER DEFAULT 8080,
+                env_vars TEXT,
+                status TEXT DEFAULT 'pending',
+                error_message TEXT,
+                path_prefix TEXT DEFAULT '/',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(app_id, name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_app_services_app ON app_services(app_id);
             "#,
         )
         .execute(&self.pool)
@@ -727,6 +748,62 @@ impl StateManager {
         Ok(result.rows_affected() > 0)
     }
 
+    // ===== App service operations =====
+
+    /// Save an app service.
+    pub async fn save_app_service(&self, svc: &AppServiceRecord) -> Result<(), StateError> {
+        sqlx::query(
+            r#"
+            INSERT INTO app_services (id, app_id, name, service_type, build_context, container_name, image_name, port, env_vars, status, error_message, path_prefix, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&svc.id)
+        .bind(&svc.app_id)
+        .bind(&svc.name)
+        .bind(&svc.service_type)
+        .bind(&svc.build_context)
+        .bind(&svc.container_name)
+        .bind(&svc.image_name)
+        .bind(svc.port)
+        .bind(&svc.env_vars)
+        .bind(&svc.status)
+        .bind(&svc.error_message)
+        .bind(&svc.path_prefix)
+        .bind(&svc.created_at)
+        .bind(&svc.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get all services for an app.
+    pub async fn get_app_services(&self, app_id: &str) -> Result<Vec<AppServiceRecord>, StateError> {
+        let rows = sqlx::query_as::<_, AppServiceRecord>(
+            "SELECT id, app_id, name, service_type, build_context, container_name, image_name, port, env_vars, status, error_message, path_prefix, created_at, updated_at FROM app_services WHERE app_id = ? ORDER BY name",
+        )
+        .bind(app_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Delete all services for an app.
+    pub async fn delete_app_services(&self, app_id: &str) -> Result<usize, StateError> {
+        let result = sqlx::query("DELETE FROM app_services WHERE app_id = ?")
+            .bind(app_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
     /// Delete proxy routes by app ID.
     pub async fn delete_proxy_routes_by_app(&self, app_id: &str) -> Result<usize, StateError> {
         let result = sqlx::query("DELETE FROM proxy_routes WHERE app_id = ?")
@@ -1034,6 +1111,68 @@ impl AppRecord {
 
     pub fn with_env_vars(mut self, env_vars: impl Into<String>) -> Self {
         self.env_vars = Some(env_vars.into());
+        self
+    }
+}
+
+/// App service record for persistence.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AppServiceRecord {
+    pub id: String,
+    pub app_id: String,
+    pub name: String,
+    pub service_type: String,
+    pub build_context: Option<String>,
+    pub container_name: String,
+    pub image_name: String,
+    pub port: i32,
+    pub env_vars: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub path_prefix: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl AppServiceRecord {
+    pub fn new(
+        id: impl Into<String>,
+        app_id: impl Into<String>,
+        name: impl Into<String>,
+        container_name: impl Into<String>,
+        image_name: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now().to_rfc3339();
+        Self {
+            id: id.into(),
+            app_id: app_id.into(),
+            name: name.into(),
+            service_type: "other".to_string(),
+            build_context: None,
+            container_name: container_name.into(),
+            image_name: image_name.into(),
+            port: 8080,
+            env_vars: None,
+            status: "pending".to_string(),
+            error_message: None,
+            path_prefix: "/".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    pub fn with_service_type(mut self, service_type: impl Into<String>) -> Self {
+        self.service_type = service_type.into();
+        self
+    }
+
+    pub fn with_port(mut self, port: i32) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub fn with_path_prefix(mut self, path_prefix: impl Into<String>) -> Self {
+        self.path_prefix = path_prefix.into();
         self
     }
 }

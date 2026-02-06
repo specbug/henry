@@ -9,7 +9,7 @@ Henry is a unified daemon that manages all aspects of a home server:
 - **Container Management** - Start, stop, restart, and monitor Docker/Podman containers
 - **Media Server** - Control Jellyfin, trigger library scans, view active playback sessions
 - **AI Integration** - Spawn Claude Code sessions and query the Anthropic API directly
-- **App Deployment (PaaS)** - Deploy apps from GitHub repos to custom domains with automatic SSL
+- **App Deployment (PaaS)** - Deploy single or multi-service apps from GitHub repos with automatic service discovery, inter-service networking, and SSL
 - **Automated Maintenance** - Scheduled backups, log rotation, update checking
 - **Reactive Monitoring** - Automatic anomaly detection and self-healing (e.g., restart crashed containers)
 - **Agentic Tasks** - Submit complex tasks that Claude plans and executes step-by-step
@@ -231,6 +231,18 @@ henry status                 # Check if daemon is running
 henry check                  # Validate configuration
 henry init                   # Generate default config.toml
 henry info                   # Show version and features
+
+# App deployment
+henry deploy <repo-url>                 # Deploy from GitHub
+henry deploy <repo-url> --domain example.com --path /app/myapp
+henry apps                              # List deployed apps
+henry logs <name>                       # App logs
+henry logs <name> --service api         # Service-specific logs (multi-service apps)
+
+# macOS LaunchAgent
+henry install                # Install as LaunchAgent (auto-starts on login)
+henry install --force        # Reinstall
+henry uninstall              # Remove LaunchAgent
 
 # Options
 henry --config <path> run    # Use specific config file
@@ -510,12 +522,35 @@ curl -X POST http://localhost:18791/api/agent/tasks/abc123/input \
 
 **Request bodies:**
 
+**Request bodies:**
+
 ```bash
-# Deploy app
+# Deploy app (auto-detects single vs multi-service)
 curl -X POST http://localhost:18791/api/apps \
   -H "Content-Type: application/json" \
-  -d '{"repo_url": "https://github.com/user/myapp", "domain": "example.com", "path_prefix": "/myapp"}'
+  -d '{"name": "myapp", "repo_url": "https://github.com/user/myapp", "domain": "example.com", "path_prefix": "/myapp"}'
 ```
+
+### Multi-Service App Deployment
+
+Henry automatically detects monorepo structures and deploys multi-service apps:
+
+```bash
+# Deploy a monorepo with frontend + backend
+henry deploy https://github.com/user/odyssey --domain example.com --path /app/odyssey
+
+# Output:
+#   Successfully deployed!
+#     Services:
+#       api        -> henry-app-odyssey-api:8000    (example.com/app/odyssey/api)
+#       webapp     -> henry-app-odyssey-webapp:3000  (example.com/app/odyssey)
+
+# Per-service logs
+henry logs odyssey --service api
+henry logs odyssey --service webapp
+```
+
+Henry discovers services by analyzing the repo structure (detecting `apps/`, `packages/`, `services/` directories) and uses Claude to classify them as frontend/backend/worker services. Inter-service networking is automatically configured via Docker environment variables (`SERVICE_API_URL`, `API_URL`, etc.).
 
 ### Proxy
 
@@ -591,7 +626,7 @@ websocat ws://localhost:18791/ws
 | **maint** | Backups, log rotation, updates | `[maint]` |
 | **reactive** | Anomaly detection & auto-remediation | `[reactive]` |
 | **agent** | AI-powered task execution | `[agent]` |
-| **apps** | Deploy apps from GitHub repos | `[apps]` |
+| **apps** | Deploy single/multi-service apps from GitHub repos | `[apps]` |
 | **proxy** | Caddy reverse proxy management | `[proxy]` |
 | **tunnel** | Cloudflare Tunnel for external access | `[tunnel]` |
 
@@ -656,45 +691,33 @@ Step types: Claude Code sessions, Claude API calls, shell commands, container op
 
 ## Running as a Service (macOS)
 
-Create `~/Library/LaunchAgents/com.henry.daemon.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.henry.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/henry</string>
-        <string>run</string>
-        <string>--headless</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOUR_USER/.henry/logs/stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USER/.henry/logs/stderr.log</string>
-</dict>
-</plist>
-```
+Henry has built-in LaunchAgent support. No need to manually create plist files:
 
 ```bash
-# Install binary
-cp target/release/henry /usr/local/bin/
+# Install as LaunchAgent (auto-starts on login, auto-restarts on crash)
+henry install
 
-# Load service
-launchctl load ~/Library/LaunchAgents/com.henry.daemon.plist
+# Check status (shows LaunchAgent status)
+henry status
 
-# Check status
-launchctl list | grep henry
+# Uninstall
+henry uninstall
+```
 
-# Unload service
-launchctl unload ~/Library/LaunchAgents/com.henry.daemon.plist
+The `install` command automatically:
+- Detects the henry binary path
+- Generates a LaunchAgent plist at `~/Library/LaunchAgents/com.henry.daemon.plist`
+- Configures `RunAtLoad` and `KeepAlive`
+- Sets up stdout/stderr logging to `~/.henry/logs/`
+- Loads the agent via `launchctl`
+
+For manual management:
+```bash
+# Force reinstall
+henry install --force
+
+# Use a specific config
+henry --config /path/to/config.toml install
 ```
 
 ---
@@ -719,7 +742,7 @@ henry/
 │   ├── henry-maint/     # Backups, log rotation, updates
 │   ├── henry-reactive/  # Anomaly detection, auto-remediation
 │   ├── henry-agent/     # ReAct pattern task execution
-│   ├── henry-apps/      # App deployment from GitHub
+│   ├── henry-apps/      # Multi-service app deployment from GitHub
 │   ├── henry-proxy/     # Caddy reverse proxy management
 │   └── henry-tunnel/    # Cloudflare Tunnel management
 └── config.example.toml
@@ -745,7 +768,7 @@ henry/
 # Build debug
 cargo build
 
-# Run tests (~120 tests)
+# Run tests (~153 tests)
 cargo test
 
 # Test specific crate

@@ -70,13 +70,17 @@ enum Commands {
         #[arg(short, long)]
         domain: Option<String>,
 
+        /// Path prefix (e.g., /app/myapp)
+        #[arg(long)]
+        path: Option<String>,
+
         /// Git branch to deploy
         #[arg(short, long, default_value = "main")]
         branch: String,
 
-        /// Container port
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
+        /// Container port (auto-detected per service if not set)
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 
     /// List deployed apps
@@ -87,10 +91,24 @@ enum Commands {
         /// App name
         name: String,
 
+        /// Service name (for multi-service apps)
+        #[arg(short, long)]
+        service: Option<String>,
+
         /// Number of lines to show
         #[arg(short, long, default_value = "50")]
         tail: usize,
     },
+
+    /// Install Henry as a macOS LaunchAgent (auto-starts on login)
+    Install {
+        /// Force reinstall if already installed
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Uninstall the Henry LaunchAgent
+    Uninstall,
 }
 
 #[tokio::main]
@@ -129,16 +147,27 @@ async fn main() -> anyhow::Result<()> {
             repo,
             name,
             domain,
+            path,
             branch,
             port,
         } => {
-            deploy_app(cli.config, &repo, name, domain, &branch, port).await?;
+            deploy_app(cli.config, &repo, name, domain, path, &branch, port).await?;
         }
         Commands::Apps => {
             list_apps(cli.config).await?;
         }
-        Commands::Logs { name, tail } => {
-            show_app_logs(cli.config, &name, tail).await?;
+        Commands::Logs {
+            name,
+            service,
+            tail,
+        } => {
+            show_app_logs(cli.config, &name, service.as_deref(), tail).await?;
+        }
+        Commands::Install { force } => {
+            install_daemon(cli.config, force).await?;
+        }
+        Commands::Uninstall => {
+            uninstall_daemon().await?;
         }
     }
 
@@ -173,6 +202,13 @@ fn show_status(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         None => {
             println!("Henry is not running");
         }
+    }
+
+    // Show launchd status on macOS
+    #[cfg(target_os = "macos")]
+    {
+        let launchd_status = henry_core::launchd::status();
+        println!("  LaunchAgent: {}", launchd_status);
     }
 
     Ok(())
@@ -218,11 +254,13 @@ fn show_info() {
     println!("Platform:    {} / {}", std::env::consts::OS, std::env::consts::ARCH);
     println!();
     println!("Features:");
-    println!("  • Container management (Podman)");
-    println!("  • Telegram bot control");
-    println!("  • HTTP/WebSocket API");
-    println!("  • Media server (Jellyfin)");
-    println!("  • Claude AI integration");
+    println!("  - Container management (Podman)");
+    println!("  - Telegram bot control");
+    println!("  - HTTP/WebSocket API");
+    println!("  - Media server (Jellyfin)");
+    println!("  - Claude AI integration");
+    println!("  - Multi-service app deployment");
+    println!("  - macOS LaunchAgent support");
     println!();
     println!("Config paths (in order of precedence):");
     for path in Config::default_paths() {
@@ -283,8 +321,9 @@ async fn deploy_app(
     repo: &str,
     name: Option<String>,
     domain: Option<String>,
+    path: Option<String>,
     branch: &str,
-    port: u16,
+    port: Option<u16>,
 ) -> anyhow::Result<()> {
     // Derive app name from repo URL if not provided
     let app_name = match name {
@@ -296,13 +335,14 @@ async fn deploy_app(
 
     // Default domain to <name>.local
     let app_domain = domain.unwrap_or_else(|| format!("{}.local", app_name));
+    let app_path = path.unwrap_or_else(|| "/".to_string());
 
     println!("Deploying app...");
     println!("  Name:   {}", app_name);
     println!("  Repo:   {}", repo);
     println!("  Branch: {}", branch);
     println!("  Domain: {}", app_domain);
-    println!("  Port:   {}", port);
+    println!("  Path:   {}", app_path);
     println!();
 
     // Load or create config
@@ -327,9 +367,17 @@ async fn deploy_app(
     // Create apps manager
     let mut apps_config = config.apps.clone();
     apps_config.enabled = true;
-    apps_config.default_port = port;
+    if let Some(p) = port {
+        apps_config.default_port = p;
+    }
 
     let mut apps_mgr = henry_apps::AppsManager::new(apps_config, containers.clone());
+
+    // Add Claude manager if available
+    if config.claude.enabled {
+        let claude_mgr = henry_claude::ClaudeManager::new(config.claude.clone(), None);
+        apps_mgr = apps_mgr.with_claude(Arc::new(RwLock::new(claude_mgr)));
+    }
 
     // Initialize (creates workspace dir)
     apps_mgr.init().await.map_err(|e| anyhow::anyhow!("Failed to initialize apps manager: {}", e))?;
@@ -339,10 +387,10 @@ async fn deploy_app(
         name: app_name.clone(),
         repo_url: repo.to_string(),
         domain: app_domain.clone(),
-        path_prefix: "/".to_string(),
+        path_prefix: app_path,
         branch: Some(branch.to_string()),
         env_vars: None,
-        port: Some(port),
+        port,
     };
 
     // Deploy
@@ -351,9 +399,26 @@ async fn deploy_app(
         Ok(app) => {
             println!();
             println!("Successfully deployed!");
-            println!("  Container: {}", app.container_name);
-            println!("  Image:     {}", app.image_name);
-            println!("  URL:       {}", app.url());
+
+            if app.services.len() > 1 {
+                println!("  Services:");
+                for svc in &app.services {
+                    let svc_url = if svc.path_prefix == "/" {
+                        format!("https://{}", app.domain)
+                    } else {
+                        format!("https://{}{}", app.domain, svc.path_prefix)
+                    };
+                    println!(
+                        "    {:<10} -> {}:{:<5}  ({})",
+                        svc.name, svc.container_name, svc.port, svc_url
+                    );
+                }
+            } else {
+                println!("  Container: {}", app.container_name);
+                println!("  Image:     {}", app.image_name);
+                println!("  URL:       {}", app.url());
+            }
+
             println!();
             println!("View logs: henry logs {}", app_name);
         }
@@ -396,12 +461,30 @@ async fn list_apps(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             app.status,
             app.url()
         );
+
+        if app.services.len() > 1 {
+            for svc in &app.services {
+                println!(
+                    "    {} [{}] ({}) -> {}:{}",
+                    svc.name,
+                    svc.service_type,
+                    svc.status,
+                    svc.container_name,
+                    svc.port
+                );
+            }
+        }
     }
 
     Ok(())
 }
 
-async fn show_app_logs(config_path: Option<PathBuf>, name: &str, tail: usize) -> anyhow::Result<()> {
+async fn show_app_logs(
+    config_path: Option<PathBuf>,
+    name: &str,
+    service: Option<&str>,
+    tail: usize,
+) -> anyhow::Result<()> {
     let config = load_config(config_path)?;
 
     let container_mgr = henry_server::ContainerManager::new(config.containers.clone())
@@ -412,12 +495,18 @@ async fn show_app_logs(config_path: Option<PathBuf>, name: &str, tail: usize) ->
     let mut apps_mgr = henry_apps::AppsManager::new(config.apps.clone(), containers);
     apps_mgr.init().await?;
 
-    match apps_mgr.logs(name, tail).await {
+    let result = if let Some(svc_name) = service {
+        apps_mgr.service_logs(name, svc_name, tail).await
+    } else {
+        apps_mgr.logs(name, tail).await
+    };
+
+    match result {
         Ok(logs) => {
             println!("{}", logs);
         }
-        Err(henry_apps::AppsError::NotFound(_)) => {
-            error!("App not found: {}", name);
+        Err(henry_apps::AppsError::NotFound(msg)) => {
+            error!("Not found: {}", msg);
             println!();
             println!("List apps with: henry apps");
         }
@@ -427,4 +516,70 @@ async fn show_app_logs(config_path: Option<PathBuf>, name: &str, tail: usize) ->
     }
 
     Ok(())
+}
+
+async fn install_daemon(config_path: Option<PathBuf>, force: bool) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (config_path, force);
+        return Err(anyhow::anyhow!(
+            "The install command is only supported on macOS (launchd)"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let log_dir = PathBuf::from(&home).join(".henry").join("logs");
+
+        let config = config_path.as_deref();
+
+        match henry_core::launchd::install(config, &log_dir, force).await {
+            Ok(()) => {
+                println!("Henry LaunchAgent installed successfully!");
+                println!();
+                println!("Henry will now:");
+                println!("  - Start automatically on login");
+                println!("  - Restart automatically if it crashes");
+                println!("  - Run in headless mode (no TUI)");
+                println!();
+                println!("Logs:");
+                println!("  stdout: {}/henry.stdout.log", log_dir.display());
+                println!("  stderr: {}/henry.stderr.log", log_dir.display());
+                println!();
+                println!("Plist: {}", henry_core::launchd::plist_path().display());
+                println!();
+                println!("To uninstall: henry uninstall");
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to install LaunchAgent: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+async fn uninstall_daemon() -> anyhow::Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err(anyhow::anyhow!(
+            "The uninstall command is only supported on macOS (launchd)"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        match henry_core::launchd::uninstall().await {
+            Ok(()) => {
+                println!("Henry LaunchAgent uninstalled successfully.");
+                println!("Henry will no longer start automatically.");
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to uninstall LaunchAgent: {}", e));
+            }
+        }
+
+        Ok(())
+    }
 }
