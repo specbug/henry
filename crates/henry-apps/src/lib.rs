@@ -263,9 +263,15 @@ impl AppsManager {
                 }
             }
 
+            // Compute build args (e.g., PUBLIC_URL for frontends)
+            let mut build_args = HashMap::new();
+            if svc.service_type == crate::types::ServiceType::Frontend {
+                build_args.insert("PUBLIC_URL".to_string(), svc.path_prefix.clone());
+            }
+
             // Build image
             let containers = self.containers.read().await;
-            if let Err(e) = builder::build_image(&app_dir, service_dir, &svc.image_name, &containers, self.config.runtime_cmd()).await {
+            if let Err(e) = builder::build_image(&app_dir, service_dir, &svc.image_name, &containers, self.config.runtime_cmd(), &build_args).await {
                 svc.status = AppStatus::Failed(format!("Build failed: {}", e));
                 app.status = AppStatus::Failed(format!("Build failed for service {}: {}", svc.name, e));
                 app.services = services;
@@ -461,14 +467,19 @@ impl AppsManager {
         // Rebuild and restart each service
         let containers = self.containers.read().await;
         let cmd = self.config.runtime_cmd();
+        let empty_args = HashMap::new();
         for svc in &app.services {
-            builder::build_image(&app_dir, svc.build_context.as_deref(), &svc.image_name, &containers, cmd).await?;
+            let mut build_args = HashMap::new();
+            if svc.service_type == crate::types::ServiceType::Frontend {
+                build_args.insert("PUBLIC_URL".to_string(), svc.path_prefix.clone());
+            }
+            builder::build_image(&app_dir, svc.build_context.as_deref(), &svc.image_name, &containers, cmd, &build_args).await?;
             containers.restart(&svc.container_name).await?;
         }
 
         // If no services (legacy single-container), use old path
         if app.services.is_empty() {
-            builder::build_image(&app_dir, None, &app.image_name, &containers, cmd).await?;
+            builder::build_image(&app_dir, None, &app.image_name, &containers, cmd, &empty_args).await?;
             containers.restart(&app.container_name).await?;
         }
         drop(containers);

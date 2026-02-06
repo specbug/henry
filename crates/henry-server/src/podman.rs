@@ -21,10 +21,31 @@ pub fn detect_podman_socket() -> Option<String> {
 
 /// Detect the Docker socket path (also works for Podman with Docker compat).
 pub fn detect_docker_socket() -> Option<String> {
-    let candidates = [
+    // Check DOCKER_HOST environment variable first
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if !host.is_empty() {
+            let path = host.strip_prefix("unix://").unwrap_or(&host);
+            if PathBuf::from(path).exists() {
+                debug!("Found Docker socket from DOCKER_HOST: {}", host);
+                return Some(if host.starts_with("unix://") {
+                    host
+                } else {
+                    format!("unix://{}", host)
+                });
+            }
+        }
+    }
+
+    let mut candidates = vec![
         PathBuf::from("/var/run/docker.sock"),
         PathBuf::from("/run/docker.sock"),
     ];
+
+    // Colima socket (Docker-compatible on macOS)
+    if let Some(home) = home_dir() {
+        candidates.push(home.join(".colima/default/docker.sock"));
+        candidates.push(home.join(".colima/docker.sock"));
+    }
 
     for path in candidates {
         if path.exists() {

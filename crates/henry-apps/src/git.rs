@@ -126,12 +126,27 @@ pub fn detect_project_type(dir: &Path) -> Option<ProjectType> {
         if dir.join("nuxt.config.js").exists() || dir.join("nuxt.config.ts").exists() {
             return Some(ProjectType::NuxtJs);
         }
+        // Detect CRA (react-scripts) apps
+        if let Ok(content) = std::fs::read_to_string(dir.join("package.json")) {
+            if content.contains("react-scripts") {
+                return Some(ProjectType::ReactCra);
+            }
+        }
         return Some(ProjectType::NodeJs);
     }
 
     if dir.join("requirements.txt").exists() || dir.join("pyproject.toml").exists() {
         if dir.join("manage.py").exists() {
             return Some(ProjectType::Django);
+        }
+        // Detect FastAPI from requirements
+        for file in &["requirements.txt", "pyproject.toml"] {
+            if let Ok(content) = std::fs::read_to_string(dir.join(file)) {
+                let lower = content.to_lowercase();
+                if lower.contains("fastapi") || lower.contains("uvicorn") {
+                    return Some(ProjectType::FastApi);
+                }
+            }
         }
         return Some(ProjectType::Python);
     }
@@ -168,7 +183,9 @@ pub enum ProjectType {
     NodeJs,
     NextJs,
     NuxtJs,
+    ReactCra,
     Python,
+    FastApi,
     Django,
     Rust,
     Go,
@@ -185,7 +202,9 @@ impl ProjectType {
         match self {
             Self::NodeJs => include_str!("../templates/dockerfile_nodejs.txt"),
             Self::NextJs => include_str!("../templates/dockerfile_nextjs.txt"),
+            Self::ReactCra => include_str!("../templates/dockerfile_react_cra.txt"),
             Self::Python => include_str!("../templates/dockerfile_python.txt"),
+            Self::FastApi => include_str!("../templates/dockerfile_fastapi.txt"),
             Self::Django => include_str!("../templates/dockerfile_django.txt"),
             Self::Rust => include_str!("../templates/dockerfile_rust.txt"),
             Self::Go => include_str!("../templates/dockerfile_go.txt"),

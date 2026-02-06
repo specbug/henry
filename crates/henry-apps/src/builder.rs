@@ -2,6 +2,7 @@
 
 use crate::AppsError;
 use henry_claude::ClaudeManager;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -261,34 +262,39 @@ fn truncate_content(content: &str, max_len: usize) -> String {
 ///
 /// `service_dir`: Optional subdirectory for monorepo services. When set, the Dockerfile
 /// is expected at `{service_dir}/Dockerfile` and the build context is the repo root.
+/// `build_args`: Optional build-time variables (e.g., PUBLIC_URL for frontends).
 pub async fn build_image(
     repo_dir: &Path,
     service_dir: Option<&str>,
     image_name: &str,
     _containers: &henry_server::ContainerManager,
     runtime_cmd: &str,
+    build_args: &HashMap<String, String>,
 ) -> Result<(), AppsError> {
     info!("Building image {} from {}", image_name, repo_dir.display());
 
-    let output = match service_dir {
-        Some(sd) => {
-            let dockerfile_path = format!("{}/Dockerfile", sd);
-            info!("Using Dockerfile at {} with repo root as build context", dockerfile_path);
-            tokio::process::Command::new(runtime_cmd)
-                .current_dir(repo_dir)
-                .args(["build", "-t", image_name, "-f", &dockerfile_path, "."])
-                .output()
-                .await
-        }
-        None => {
-            tokio::process::Command::new(runtime_cmd)
-                .current_dir(repo_dir)
-                .args(["build", "-t", image_name, "."])
-                .output()
-                .await
-        }
+    let mut args = vec!["build".to_string(), "-t".to_string(), image_name.to_string()];
+
+    // Add build args
+    for (key, value) in build_args {
+        args.push("--build-arg".to_string());
+        args.push(format!("{}={}", key, value));
     }
-    .map_err(|e| AppsError::Build(format!("Failed to execute {} build: {}", runtime_cmd, e)))?;
+
+    if let Some(sd) = service_dir {
+        let dockerfile_path = format!("{}/Dockerfile", sd);
+        info!("Using Dockerfile at {} with repo root as build context", dockerfile_path);
+        args.extend(["-f".to_string(), dockerfile_path]);
+    }
+
+    args.push(".".to_string());
+
+    let output = tokio::process::Command::new(runtime_cmd)
+        .current_dir(repo_dir)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| AppsError::Build(format!("Failed to execute {} build: {}", runtime_cmd, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
