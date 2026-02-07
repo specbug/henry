@@ -346,13 +346,30 @@ async fn deploy_app(
     println!();
 
     // Load or create config
-    let config = match load_config(config_path.clone()) {
+    let mut config = match load_config(config_path.clone()) {
         Ok(c) => c,
         Err(_) => {
             println!("No config found, using defaults...");
             Config::default()
         }
     };
+
+    // Auto-detect container runtime: prefer podman, fall back to docker
+    if config.containers.use_podman {
+        let podman_ok = std::process::Command::new("podman")
+            .arg("version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !podman_ok {
+            println!("Podman not available, falling back to Docker...");
+            config.containers.use_podman = false;
+            config.apps.use_podman = false;
+        }
+    }
 
     // Initialize container manager
     let runtime_type = if config.containers.use_podman { "Podman" } else { "Docker" };

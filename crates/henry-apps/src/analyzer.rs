@@ -143,7 +143,76 @@ fn has_project_indicators(dir: &Path) -> bool {
         "main.go",
     ];
 
-    indicators.iter().any(|f| dir.join(f).exists())
+    if !indicators.iter().any(|f| dir.join(f).exists()) {
+        return false;
+    }
+
+    // Filter out shared libraries that aren't deployable services.
+    // A directory under packages/ with package.json but no start script,
+    // no Dockerfile, and no server entry point is likely a shared library.
+    if !is_deployable_service(dir) {
+        return false;
+    }
+
+    true
+}
+
+/// Check if a directory looks like a deployable service (not just a shared library).
+fn is_deployable_service(dir: &Path) -> bool {
+    // Always deployable if it has a Dockerfile
+    if dir.join("Dockerfile").exists() {
+        return true;
+    }
+
+    // Server entry points that indicate a runnable service
+    let server_indicators = [
+        "main.py", "app.py", "run.py", "server.py", "manage.py",
+        "server.js", "server.ts", "main.go",
+    ];
+    if server_indicators.iter().any(|f| dir.join(f).exists()) {
+        return true;
+    }
+
+    // Check package.json for a "start" script (indicates runnable)
+    if let Ok(content) = std::fs::read_to_string(dir.join("package.json")) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(scripts) = pkg.get("scripts").and_then(|v| v.as_object()) {
+                if scripts.contains_key("start") || scripts.contains_key("serve") {
+                    return true;
+                }
+                // CRA apps have a "build" script but serve via static files
+                if scripts.contains_key("build") {
+                    // Check if it's a frontend framework (has src/App.js etc.)
+                    if dir.join("src/App.js").exists()
+                        || dir.join("src/App.tsx").exists()
+                        || dir.join("src/App.jsx").exists()
+                        || dir.join("public/index.html").exists()
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Cargo.toml with a [[bin]] section or src/main.rs
+    if dir.join("Cargo.toml").exists() && dir.join("src/main.rs").exists() {
+        return true;
+    }
+
+    // Go with main package
+    if dir.join("go.mod").exists() && dir.join("main.go").exists() {
+        return true;
+    }
+
+    // pyproject.toml with scripts section
+    if let Ok(content) = std::fs::read_to_string(dir.join("pyproject.toml")) {
+        if content.contains("[project.scripts]") || content.contains("[tool.poetry.scripts]") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Detect the service type (frontend/backend/worker) from directory contents.
