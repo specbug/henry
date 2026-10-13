@@ -266,3 +266,20 @@ fn lease_without_route(name: &str) -> (Lease, String) {
     );
     (Lease::parse(&text).unwrap(), text)
 }
+
+#[test]
+fn releases_are_found_by_commit_and_superseded_by_newer_ones() {
+    let db = db_with("draw", "draw.example.com");
+    assert_eq!(db.release_for_commit("draw", "aaa").unwrap(), None);
+    let a = db.create_release("draw", "aaa", "c").unwrap();
+    db.set_release_state(a.id, ReleaseState::Trial, None).unwrap();
+    let b = db.create_release("draw", "bbb", "c").unwrap();
+    assert_eq!(db.release_for_commit("draw", "aaa").unwrap().map(|r| r.id), Some(a.id));
+
+    let live = db.create_release("draw", "ccc", "c").unwrap();
+    db.set_release_state(live.id, ReleaseState::Live, None).unwrap();
+    assert_eq!(db.supersede_trials("draw", b.id).unwrap(), 1, "only the trial goes; live and the kept one stay");
+    assert_eq!(db.release(a.id).unwrap().state, ReleaseState::Superseded);
+    assert_eq!(db.release(b.id).unwrap().state, ReleaseState::Pending);
+    assert_eq!(db.release(live.id).unwrap().state, ReleaseState::Live);
+}

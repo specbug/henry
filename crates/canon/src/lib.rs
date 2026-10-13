@@ -432,6 +432,39 @@ impl Canon {
         rows.map(|r| r?).collect()
     }
 
+    /// The newest release of `commit` for an app, whatever its state.
+    pub fn release_for_commit(&self, app: &str, commit: &str) -> Result<Option<Release>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            &format!("SELECT {RELEASE_COLS} FROM releases WHERE app = ?1 AND commit_sha = ?2 ORDER BY id DESC LIMIT 1"),
+            params![app, commit],
+            release_row,
+        )
+        .optional()?
+        .transpose()
+    }
+
+    /// Retire every release of `app` still on trial or in proof, other than
+    /// `keep`: a newer push replaces them.
+    pub fn supersede_trials(&self, app: &str, keep: i64) -> Result<usize> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE releases SET state = 'superseded', finished_at = ?3
+             WHERE app = ?1 AND id != ?2 AND state IN ('pending', 'building', 'trial', 'proof')",
+            params![app, keep, now_ms()],
+        )?;
+        if n > 0 {
+            record(
+                &conn,
+                Some(app),
+                "release.superseded",
+                &format!("{n} older release(s) superseded"),
+                &serde_json::Value::Null,
+            )?;
+        }
+        Ok(n)
+    }
+
     /// The releases Plumb should be running for an app: the live one, and the
     /// newest release still being tried that is newer than it.
     pub fn wanted_releases(&self, app: &str) -> Result<Wanted> {

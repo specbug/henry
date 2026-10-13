@@ -1,0 +1,307 @@
+//! Press against real git (a bare repo on disk) and a fake builder.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+
+use canon::{JobState, Status};
+
+use super::*;
+
+const LEASE: &str = r#"
+name = "draw"
+
+[[service]]
+name = "web"
+port = 8080
+build = { dockerfile = "Dockerfile" }
+health = { http = "/" }
+
+[[service]]
+name = "cache"
+port = 6379
+build = { image = "redis:7-alpine" }
+health = { redis = true }
+"#;
+
+#[derive(Default)]
+struct FakeBuilder {
+    built: Mutex<Vec<String>>,
+    /// How many of the next builds fail.
+    failures: Mutex<u32>,
+}
+
+impl Builder for FakeBuilder {
+    async fn has(&self, tag: &str) -> Result<bool> {
+        Ok(self.built.lock().unwrap().iter().any(|t| t == tag))
+    }
+
+    async fn build(&self, req: &BuildRequest<'_>) -> Result<()> {
+        assert!(req.dockerfile.exists(), "the Dockerfile is checked out: {}", req.dockerfile.display());
+        std::fs::create_dir_all(req.log.parent().unwrap()).unwrap();
+        let mut failures = self.failures.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            std::fs::write(req.log, "step 3/5: RUN make\nmake: *** [all] Error 2\n").unwrap();
+            return Err(Error::Build("the build exited with exit status: 2".into()));
+        }
+        self.built.lock().unwrap().push(req.tag.to_owned());
+        Ok(())
+    }
+}
+
+struct World {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    work: PathBuf,
+    origin: String,
+    canon: Arc<Canon>,
+    press: Press<Arc<FakeBuilder>>,
+    builder: Arc<FakeBuilder>,
+}
+
+impl Builder for Arc<FakeBuilder> {
+    async fn has(&self, tag: &str) -> Result<bool> {
+        (**self).has(tag).await
+    }
+    async fn build(&self, req: &BuildRequest<'_>) -> Result<()> {
+        (**self).build(req).await
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn world() -> World {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let bare = root.join("origin.git");
+    let work = root.join("work");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    git(&bare, &["init", "--quiet", "--bare", "--initial-branch=main"]);
+    git(&work, &["init", "--quiet", "--initial-branch=main"]);
+    let origin = format!("file://{}", bare.display());
+    git(&work, &["remote", "add", "origin", &origin]);
+
+    let canon = Arc::new(Canon::open_in_memory().unwrap());
+    canon.insert_app(&Lease::parse(LEASE).unwrap(), LEASE, &origin, Source::Operator).unwrap();
+    let builder = Arc::new(FakeBuilder::default());
+    let settings = Settings {
+        checkouts: root.join("checkouts"),
+        logs: root.join("logs"),
+        limits: lease::Limits::default(),
+        build_retries: 1,
+        retry_pause: Duration::ZERO,
+    };
+    let press = Press::new(canon.clone(), Git::default(), builder.clone(), settings);
+    World { _dir: dir, root, work, origin, canon, press, builder }
+}
+
+impl World {
+    /// Commit these files and push. Returns the commit.
+    fn push(&self, files: &[(&str, &str)]) -> String {
+        for (path, text) in files {
+            let p = self.work.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        git(&self.work, &["add", "-A"]);
+        git(&self.work, &["commit", "--quiet", "--allow-empty", "-m", "change"]);
+        git(&self.work, &["push", "--quiet", "origin", "main"]);
+        git(&self.work, &["rev-parse", "HEAD"])
+    }
+
+    fn job(&self, commit: Option<&str>, force: bool) -> Job {
+        let job = request(&self.canon, "draw", commit, force).unwrap();
+        self.canon.claim().unwrap().unwrap();
+        job
+    }
+
+    async fn deploy(&self) -> Outcome {
+        let job = self.job(None, false);
+        let out = self.press.run(&job).await.unwrap();
+        self.canon.finish(job.id).unwrap();
+        out
+    }
+}
+
+#[tokio::test]
+async fn a_push_becomes_a_release_on_trial() {
+    let w = world();
+    let sha = w.push(&[("Dockerfile", "FROM scratch\n")]);
+    let Outcome::Released(id) = w.deploy().await else { panic!("expected a release") };
+
+    let r = w.canon.release(id).unwrap();
+    assert_eq!(r.state, ReleaseState::Trial);
+    assert_eq!(r.commit_sha, sha);
+    let tag = format!("henry/draw-web:{}", &sha[..12]);
+    assert_eq!(r.images["web"], tag.as_str());
+    assert_eq!(r.images["cache"], "redis:7-alpine", "published images pass through untouched");
+    assert_eq!(*w.builder.built.lock().unwrap(), [tag]);
+    assert_eq!(w.canon.wanted_releases("draw").unwrap().candidate.map(|r| r.id), Some(id));
+}
+
+#[tokio::test]
+async fn polling_queues_each_commit_once() {
+    let w = world();
+    w.push(&[("Dockerfile", "FROM scratch\n")]);
+    assert_eq!(w.press.poll().await.unwrap(), ["draw"]);
+    let job = w.canon.claim().unwrap().unwrap();
+    w.press.run(&job).await.unwrap();
+    w.canon.finish(job.id).unwrap();
+    assert!(w.press.poll().await.unwrap().is_empty(), "this commit is released");
+
+    w.push(&[("README", "more")]);
+    assert_eq!(w.press.poll().await.unwrap(), ["draw"]);
+}
+
+#[tokio::test]
+async fn a_stopped_or_manual_app_is_not_polled() {
+    let w = world();
+    w.push(&[("Dockerfile", "FROM scratch\n")]);
+    w.canon.set_desired("draw", Desired::Stopped).unwrap();
+    assert!(w.press.poll().await.unwrap().is_empty());
+
+    w.canon.set_desired("draw", Desired::Running).unwrap();
+    let manual = format!("auto_deploy = false\n{LEASE}");
+    w.canon.update_lease(&Lease::parse(&manual).unwrap(), &manual, Source::Operator).unwrap();
+    assert!(w.press.poll().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_same_commit_is_released_once_unless_forced() {
+    let w = world();
+    w.push(&[("Dockerfile", "FROM scratch\n")]);
+    let Outcome::Released(first) = w.deploy().await else { panic!() };
+    assert_eq!(w.deploy().await, Outcome::Already(first));
+
+    let job = w.job(None, true);
+    let Outcome::Released(again) = w.press.run(&job).await.unwrap() else { panic!() };
+    assert_ne!(again, first);
+    assert_eq!(w.builder.built.lock().unwrap().len(), 1, "the image for this commit is reused, not rebuilt");
+    assert_eq!(w.canon.release(first).unwrap().state, ReleaseState::Superseded);
+}
+
+#[tokio::test]
+async fn a_newer_push_supersedes_the_older_trial() {
+    let w = world();
+    w.push(&[("Dockerfile", "FROM scratch\n")]);
+    let Outcome::Released(a) = w.deploy().await else { panic!() };
+    w.push(&[("Dockerfile", "FROM scratch\nLABEL v=2\n")]);
+    let Outcome::Released(b) = w.deploy().await else { panic!() };
+    assert_eq!(w.canon.release(a).unwrap().state, ReleaseState::Superseded);
+    assert_eq!(w.canon.wanted_releases("draw").unwrap().candidate.map(|r| r.id), Some(b));
+}
+
+#[tokio::test]
+async fn the_repos_own_lease_wins() {
+    let w = world();
+    let repo_lease = LEASE.replace("port = 8080", "port = 9090");
+    w.push(&[("Dockerfile", "FROM scratch\n"), ("lease.toml", &repo_lease)]);
+    let Outcome::Released(id) = w.deploy().await else { panic!() };
+    let app = w.canon.app("draw").unwrap();
+    assert_eq!(app.source, Source::Repo);
+    assert_eq!(app.lease().unwrap().service("web").unwrap().port, Some(9090));
+    assert_eq!(w.canon.release(id).unwrap().lease, repo_lease);
+}
+
+#[tokio::test]
+async fn a_bad_lease_in_the_repo_fails_the_release_and_is_not_retried() {
+    let w = world();
+    let bad = LEASE.replace("health = { http = \"/\" }", "privileged = true");
+    w.push(&[("Dockerfile", "FROM scratch\n"), ("lease.toml", &bad)]);
+    let Outcome::Failed(id, why) = w.deploy().await else { panic!() };
+    assert!(why.contains("lease.toml"), "{why}");
+    assert_eq!(w.canon.release(id).unwrap().state, ReleaseState::Failed);
+    assert_eq!(w.canon.app("draw").unwrap().source, Source::Operator, "the stored lease is untouched");
+    assert!(w.press.poll().await.unwrap().is_empty(), "a failed commit waits for a new push");
+    assert!(w.builder.built.lock().unwrap().is_empty(), "nothing was built");
+
+    let renamed = LEASE.replace("name = \"draw\"", "name = \"other\"");
+    w.push(&[("lease.toml", &renamed)]);
+    let Outcome::Failed(_, why) = w.deploy().await else { panic!() };
+    assert!(why.contains("names the app `other`"), "{why}");
+}
+
+#[tokio::test]
+async fn a_build_gets_one_retry() {
+    let w = world();
+    w.push(&[("Dockerfile", "FROM scratch\n")]);
+    *w.builder.failures.lock().unwrap() = 1;
+    assert!(matches!(w.deploy().await, Outcome::Released(_)), "the second attempt succeeds");
+
+    w.push(&[("Dockerfile", "FROM scratch\nLABEL v=2\n")]);
+    *w.builder.failures.lock().unwrap() = 2;
+    let Outcome::Failed(id, why) = w.deploy().await else { panic!() };
+    assert!(why.contains("`web` did not build"), "{why}");
+    assert!(why.contains("make: *** [all] Error 2"), "the log's tail is in the reason: {why}");
+    assert_eq!(w.canon.release(id).unwrap().state, ReleaseState::Failed);
+    assert_eq!(w.canon.app("draw").unwrap().status, Status::Onboarding, "a failed build changes no app status");
+}
+
+#[tokio::test]
+async fn railpack_waits_for_draft() {
+    let w = world();
+    let lease = LEASE.replace("build = { dockerfile = \"Dockerfile\" }", "build = { railpack = \".\" }");
+    w.push(&[("lease.toml", &lease)]);
+    let Outcome::Failed(_, why) = w.deploy().await else { panic!() };
+    assert!(why.contains("Railpack"), "{why}");
+}
+
+#[tokio::test]
+async fn the_checkout_is_exact_and_clean() {
+    let w = world();
+    let first = w.push(&[("Dockerfile", "FROM scratch\n"), ("old.txt", "x")]);
+    w.deploy().await;
+    let checkout = w.root.join("checkouts/draw");
+    std::fs::write(checkout.join("junk"), "left behind").unwrap();
+    std::fs::remove_file(w.work.join("old.txt")).unwrap();
+    w.push(&[]);
+    w.deploy().await;
+    assert!(!checkout.join("junk").exists(), "untracked files are cleaned");
+    assert!(!checkout.join("old.txt").exists(), "deleted files are gone");
+    assert_ne!(git(&checkout, &["rev-parse", "HEAD"]), first);
+}
+
+#[tokio::test]
+async fn an_interrupted_build_resumes_its_release() {
+    let w = world();
+    let sha = w.push(&[("Dockerfile", "FROM scratch\n")]);
+    let half = w.canon.create_release("draw", &sha, LEASE).unwrap();
+    w.canon.set_release_state(half.id, ReleaseState::Building, None).unwrap();
+    assert_eq!(w.deploy().await, Outcome::Released(half.id));
+}
+
+#[tokio::test]
+async fn an_explicit_commit_is_released_even_if_not_the_head() {
+    let w = world();
+    let old = w.push(&[("Dockerfile", "FROM scratch\n")]);
+    w.push(&[("Dockerfile", "FROM scratch\nLABEL v=2\n")]);
+    let job = w.job(Some(&old), false);
+    let Outcome::Released(id) = w.press.run(&job).await.unwrap() else { panic!() };
+    assert_eq!(w.canon.release(id).unwrap().commit_sha, old);
+}
+
+#[tokio::test]
+async fn a_missing_branch_is_an_error_not_a_release() {
+    let w = world();
+    let job = w.job(None, false);
+    let err = w.press.run(&job).await.unwrap_err();
+    assert!(err.to_string().contains("no branch"), "{err}");
+    assert!(w.canon.releases("draw", 5).unwrap().is_empty());
+    assert_eq!(w.canon.job(job.id).unwrap().state, JobState::Running);
+    let _ = &w.origin;
+}
