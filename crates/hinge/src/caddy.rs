@@ -80,29 +80,43 @@ impl Caddy {
     }
 }
 
+/// How long a refused connection is retried. Caddy restarts its admin
+/// endpoint after every load, and a request in that gap is refused.
+const ADMIN_RESTART: Duration = Duration::from_millis(1500);
+
+impl Caddy {
+    async fn send(&self, req: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let deadline = tokio::time::Instant::now() + ADMIN_RESTART;
+        loop {
+            match req().send().await {
+                Err(e) if e.is_connect() && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                other => return other.map_err(|e| Error::Unreachable("Caddy", e.to_string())),
+            }
+        }
+    }
+}
+
 impl Proxy for Caddy {
     async fn apply(&self, routes: &[Route]) -> Result<bool> {
         let want = self.config(routes);
-        let current = self
-            .client
-            .get(format!("{}/config/", self.admin))
-            .send()
-            .await
-            .map_err(|e| Error::Unreachable("Caddy", e.to_string()))?;
+        let current = self.send(|| self.client.get(format!("{}/config/", self.admin))).await?;
         if current.status().is_success() {
             let have: Value = current.json().await.unwrap_or(Value::Null);
             if have == want {
                 return Ok(false);
             }
         }
+        let body = serde_json::to_vec(&want).expect("a config always serializes");
         let loaded = self
-            .client
-            .post(format!("{}/load", self.admin))
-            .header("content-type", "application/json")
-            .body(serde_json::to_vec(&want).expect("a config always serializes"))
-            .send()
-            .await
-            .map_err(|e| Error::Unreachable("Caddy", e.to_string()))?;
+            .send(|| {
+                self.client
+                    .post(format!("{}/load", self.admin))
+                    .header("content-type", "application/json")
+                    .body(body.clone())
+            })
+            .await?;
         if !loaded.status().is_success() {
             let body = loaded.text().await.unwrap_or_default();
             return Err(Error::Refused("Caddy", body));

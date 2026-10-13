@@ -212,6 +212,10 @@ struct CaddyState {
 }
 
 async fn mock_caddy() -> (String, Arc<CaddyState>) {
+    mock_caddy_on(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()).await
+}
+
+async fn mock_caddy_on(listener: tokio::net::TcpListener) -> (String, Arc<CaddyState>) {
     let state = Arc::new(CaddyState::default());
     let app = Router::new()
         .route(
@@ -226,10 +230,31 @@ async fn mock_caddy() -> (String, Arc<CaddyState>) {
             }),
         )
         .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), state)
+}
+
+#[tokio::test]
+async fn caddy_is_waited_for_while_its_admin_endpoint_restarts() {
+    // A port nothing listens on yet, the way Caddy's admin port is for a
+    // moment after each load.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let late = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        mock_caddy_on(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap()).await
+    });
+    let caddy = Caddy::new(format!("http://127.0.0.1:{port}"), "127.0.0.1:8080");
+    assert!(caddy.apply(&[]).await.unwrap());
+    let (_, state) = late.await.unwrap();
+    assert_eq!(*state.loads.lock().unwrap(), 1);
+
+    // Nothing ever answering is still an error, soon.
+    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let started = std::time::Instant::now();
+    let err = Caddy::new(format!("http://127.0.0.1:{gone}"), "127.0.0.1:8080").apply(&[]).await.unwrap_err();
+    assert!(matches!(err, Error::Unreachable("Caddy", _)), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[tokio::test]
