@@ -1,0 +1,18 @@
+[package]
+name = "sound"
+description = "Takes soundings of a repo before anything sails: the scan that uses no AI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lease.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

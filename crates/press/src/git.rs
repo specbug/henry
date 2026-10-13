@@ -72,6 +72,15 @@ impl Git {
         }))
     }
 
+    /// The branch the remote's HEAD points at, e.g. `main`.
+    pub async fn default_branch(&self, url: &str) -> Result<Option<String>> {
+        let out = self.run(None, &["ls-remote", "--symref", url, "HEAD"], QUICK).await.map_err(Error::transient)?;
+        Ok(out.lines().find_map(|l| {
+            let target = l.strip_prefix("ref: refs/heads/")?.split('\t').next()?;
+            Some(target.to_owned())
+        }))
+    }
+
     /// Make `dir` an exact copy of `commit`: fetched, checked out, and
     /// cleaned of anything else. Henry owns the directory, so force is safe.
     pub async fn checkout(&self, dir: &Path, url: &str, branch: &str, commit: &str) -> Result<()> {

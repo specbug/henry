@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use canon::{JobState, Status};
 
 use super::*;
+use crate::build::Recipe;
 
 const LEASE: &str = r#"
 name = "draw"
@@ -27,6 +28,7 @@ health = { redis = true }
 #[derive(Default)]
 struct FakeBuilder {
     built: Mutex<Vec<String>>,
+    recipes: Mutex<Vec<String>>,
     /// How many of the next builds fail.
     failures: Mutex<u32>,
 }
@@ -37,7 +39,13 @@ impl Builder for FakeBuilder {
     }
 
     async fn build(&self, req: &BuildRequest<'_>) -> Result<()> {
-        assert!(req.dockerfile.exists(), "the Dockerfile is checked out: {}", req.dockerfile.display());
+        match req.recipe {
+            Recipe::Dockerfile { dockerfile, .. } => {
+                assert!(dockerfile.exists(), "the Dockerfile is checked out: {}", dockerfile.display());
+            }
+            Recipe::Railpack { dir } => assert!(dir.is_dir(), "Railpack gets the source: {}", dir.display()),
+        }
+        self.recipes.lock().unwrap().push(format!("{:?}", req.recipe));
         std::fs::create_dir_all(req.log.parent().unwrap()).unwrap();
         let mut failures = self.failures.lock().unwrap();
         if *failures > 0 {
@@ -147,8 +155,8 @@ async fn a_push_becomes_a_release_on_trial() {
     let r = w.canon.release(id).unwrap();
     assert_eq!(r.state, ReleaseState::Trial);
     assert_eq!(r.commit_sha, sha);
-    let tag = format!("henry/draw-web:{}", &sha[..12]);
-    assert_eq!(r.images["web"], tag.as_str());
+    let tag = r.images["web"].as_str().unwrap().to_owned();
+    assert!(tag.starts_with(&format!("henry/draw-web:{}-", &sha[..12])), "{tag}");
     assert_eq!(r.images["cache"], "redis:7-alpine", "published images pass through untouched");
     assert_eq!(*w.builder.built.lock().unwrap(), [tag]);
     assert_eq!(w.canon.wanted_releases("draw").unwrap().candidate.map(|r| r.id), Some(id));
@@ -253,12 +261,36 @@ async fn a_build_gets_one_retry() {
 }
 
 #[tokio::test]
-async fn railpack_waits_for_draft() {
+async fn a_service_without_a_dockerfile_is_built_by_railpack() {
     let w = world();
-    let lease = LEASE.replace("build = { dockerfile = \"Dockerfile\" }", "build = { railpack = \".\" }");
-    w.push(&[("lease.toml", &lease)]);
-    let Outcome::Failed(_, why) = w.deploy().await else { panic!() };
-    assert!(why.contains("Railpack"), "{why}");
+    let lease = LEASE.replace("build = { dockerfile = \"Dockerfile\" }", "build = { railpack = \"app\" }");
+    w.push(&[("lease.toml", &lease), ("app/package.json", "{}")]);
+    let Outcome::Released(id) = w.deploy().await else { panic!() };
+    let recipes = w.builder.recipes.lock().unwrap().clone();
+    assert_eq!(recipes.len(), 1);
+    assert!(recipes[0].starts_with("Railpack") && recipes[0].contains("checkouts/draw/app"), "{recipes:?}");
+    assert!(w.canon.release(id).unwrap().images["web"].as_str().unwrap().starts_with("henry/draw-web:"));
+}
+
+#[tokio::test]
+async fn overlays_are_written_into_the_checkout_and_name_the_image() {
+    let w = world();
+    let lease =
+        LEASE.replace("build = { dockerfile = \"Dockerfile\" }", "build = { dockerfile = \".henry/Dockerfile\" }");
+    w.canon.update_lease(&Lease::parse(&lease).unwrap(), &lease, Source::Ghost).unwrap();
+    w.canon.set_overlays("draw", &[(".henry/Dockerfile".into(), "FROM scratch\n".into())]).unwrap();
+    let sha = w.push(&[("README.md", "hi")]);
+    let Outcome::Released(first) = w.deploy().await else { panic!() };
+    let checkout = w.root.join("checkouts/draw");
+    assert_eq!(std::fs::read_to_string(checkout.join(".henry/Dockerfile")).unwrap(), "FROM scratch\n");
+
+    // The same commit with a different Dockerfile is a different image.
+    w.canon.set_overlays("draw", &[(".henry/Dockerfile".into(), "FROM scratch\nLABEL v=2\n".into())]).unwrap();
+    let job = w.job(Some(&sha), true);
+    let Outcome::Released(second) = w.press.run(&job).await.unwrap() else { panic!() };
+    let image = |id| w.canon.release(id).unwrap().images["web"].as_str().unwrap().to_owned();
+    assert_ne!(image(first), image(second));
+    assert_eq!(w.builder.built.lock().unwrap().len(), 2, "built again, not reused");
 }
 
 #[tokio::test]

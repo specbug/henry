@@ -9,8 +9,10 @@ rust-version.workspace = true
 [dependencies]
 base64.workspace = true
 canon.workspace = true
+hex.workspace = true
 hush.workspace = true
 lease.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

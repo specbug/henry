@@ -8,10 +8,10 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 5 of 10.** Henry builds, proves, runs and routes your
-> apps: every push is built, run on trial and soaked, and only a release that
-> holds goes live and gets traffic. Onboarding a repo still means writing its
-> `lease.toml` by hand; that is milestone 6. See [Build order](#build-order).
+> **Status: milestone 6 of 10.** Point Henry at a repo and it works out how to
+> run it, builds it, proves it and routes it; every push after that is built,
+> soaked and goes live only if it holds. Backups are next. See
+> [Build order](#build-order).
 
 ## The parts
 
@@ -21,7 +21,7 @@ something second about how.
 
 | Name | Part | Status |
 | --- | --- | --- |
-| **Henry** | The daemon and CLI | running Plumb, Press, Proof and Hinge |
+| **Henry** | The daemon and CLI | running Plumb, Press, Proof, Hinge and Draft |
 | **Canon** | SQLite desired state: apps, routes, releases, jobs, events | done |
 | **Lease** | The per-app spec, `lease.toml`, and its policy checks | done |
 | **Hush** | Secrets, sealed at rest with a key in the macOS Keychain | done |
@@ -30,9 +30,9 @@ something second about how.
 | **Press** | Fetch, build and release on every push | done |
 | **Hinge** | cloudflared and Caddy: routes that swing atomically | done |
 | **Proof** | The Live gate: soak, probes, restart test, public probe | done |
-| **Draft** | Onboarding, from repo URL to Live | milestone 6 |
-| **Sound** | The repo scan that uses no AI | milestone 6 |
-| **Ghost** | The AI, which proposes and never decides | milestone 6 |
+| **Draft** | Onboarding, from repo URL to Live, round by round | done |
+| **Sound** | The repo scan that uses no AI | done |
+| **Ghost** | The AI, which proposes and never decides | done |
 | **Ark** | Backups to R2 with restic, and restore drills | milestone 7 |
 | **Mend** | The upkeep loop: upgrades with automatic rollback | milestone 8 |
 | **Bench** | The model eval that decides the default model | milestone 8 |
@@ -57,6 +57,70 @@ secrets = ["SESSION_KEY"]
 ```
 
 [`examples/lease.toml`](examples/lease.toml) shows every field.
+
+## How a repo becomes an app
+
+```sh
+henry onboard https://github.com/you/draw --hostname draw.example.com
+henry show draw      # where it stands
+henry plans draw     # every plan it weighed, in full
+```
+
+Draft works in rounds. Each round picks the most deterministic plan not yet
+tried, checks it, builds it and puts it on trial:
+
+1. **The repo's own `lease.toml`**, used as is. If it fails, you fix the repo.
+2. **Sound's draft.** Sound scans the repo without AI: Dockerfiles, a compose
+   file, language manifests, `.env.example`, the env var names the code reads,
+   and commands from CI and Procfiles. From a compose file or a Dockerfile it
+   drafts the services; from a bare manifest (`package.json`, `pyproject.toml`,
+   `go.mod`, `Cargo.toml`, …) it asks Railpack to build. An app that uses
+   Postgres or Redis gets its own, with a generated password and URL. Sound
+   says where it guessed.
+3. **Ghost's plan.** When Sound's draft fails, or there is nothing to draft
+   from, Ghost reads the repo (list, read, search; never `.env` files or keys)
+   and proposes a lease, and a Dockerfile under `.henry/` if one is needed.
+   Each proposal is checked the moment it is made; a refusal goes straight
+   back to Ghost. A build log or a failed trial goes back too, and Ghost
+   revises.
+
+A plan goes live only through the same gate as every push. Onboarding stops at
+five rounds or two million model tokens, whichever comes first, and says why.
+Ghost never sees a secret's value: it names secrets, and you set them
+(`henry secret set draw/STRIPE_KEY`) or Henry generates them. While a secret is
+missing, the trial waits for you instead of failing.
+
+Files Ghost writes live in Canon and are laid over each checkout under
+`.henry/`; Henry never commits to your repo.
+
+### AI providers
+
+Set a key for any of them; Henry uses the first it finds, Meta first, or the
+model you name.
+
+```sh
+henry secret set henry/META_API_KEY        # or GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY
+```
+
+```toml
+# henry.toml
+[ai]
+default_model = "claude/claude-sonnet-5-5"   # provider/model; optional
+max_rounds = 5
+max_tokens = 2000000                          # per onboarding
+```
+
+Meta's API, Gemini and OpenAI are reached through their OpenAI-compatible
+endpoints; Claude through its own API. `[ai.endpoints]` overrides an endpoint.
+With no key at all, onboarding gets as far as the repo and Sound can take it.
+
+### Railpack
+
+Repos without a Dockerfile are built by [Railpack](https://railpack.com), which
+needs BuildKit. Install Railpack (`brew install railpack`, or set
+`[press] railpack`); Henry runs BuildKit itself as the `henry-buildkit`
+container and gives Railpack a `docker` that is Podman. Without Railpack, Ghost
+writes a Dockerfile instead.
 
 ## How Plumb keeps apps running
 
@@ -189,8 +253,10 @@ henry routes                                     # what is routed where
 
 ```sh
 cargo build --release
+./target/release/henry onboard https://github.com/you/draw --hostname draw.example.com
+./target/release/henry plans draw                # the plans onboarding weighed
 ./target/release/henry check lease.toml          # policy-check a lease
-./target/release/henry add lease.toml --repo https://github.com/you/draw
+./target/release/henry add lease.toml --repo https://github.com/you/draw   # or bring your own lease
 ./target/release/henry secret set draw/SESSION_KEY   # value read from stdin
 ./target/release/henry deploy draw               # build and try the branch now
 ./target/release/henry trial draw                # try a release made of existing images, through Proof
@@ -212,8 +278,8 @@ the paths; `HENRY_HOME` overrides them.
 2. **Hold and Plumb** — Podman runtime and the reconcile loop.
 3. **Press** — fetch, build and release on push.
 4. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS.
-5. **Proof** — the Live gate. *(this)*
-6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
+5. **Proof** — the Live gate.
+6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers. *(this)*
 7. **Ark** — backups and restore drills.
 8. **Mend and Bench** — upkeep and model eval.
 9. **Glass** — the web UI.

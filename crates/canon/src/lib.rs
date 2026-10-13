@@ -8,6 +8,7 @@
 //! power cut [`Canon::requeue_interrupted`] puts every half-done job back
 //! on the queue and the daemon simply carries on.
 
+mod draft;
 mod schema;
 
 use std::path::Path;
@@ -17,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lease::Lease;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+pub use draft::{Draft, NewProposal, Proposal};
 pub use rusqlite;
 pub use schema::LATEST as SCHEMA_VERSION;
 pub use serde_json;
@@ -72,7 +74,7 @@ macro_rules! text_enum {
 
 text_enum! {
     /// Who wrote the lease Henry is running.
-    Source { Repo = "repo", Ghost = "ghost", Operator = "operator" }
+    Source { Repo = "repo", Sound = "sound", Ghost = "ghost", Operator = "operator" }
 }
 
 text_enum! {
@@ -102,6 +104,19 @@ text_enum! {
         Live = "live",
         Failed = "failed",
         Superseded = "superseded",
+    }
+}
+
+text_enum! {
+    /// Where an onboarding stands. Build and Trial watch Press and Proof;
+    /// the others are Draft's own steps.
+    DraftStage {
+        Survey = "survey",
+        Plan = "plan",
+        Build = "build",
+        Trial = "trial",
+        Live = "live",
+        Stuck = "stuck",
     }
 }
 
@@ -341,6 +356,8 @@ impl Canon {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM secrets WHERE scope = ?1", [name])?;
+        tx.execute("DELETE FROM drafts WHERE app = ?1", [name])?;
+        tx.execute("DELETE FROM proposals WHERE app = ?1", [name])?;
         if tx.execute("DELETE FROM apps WHERE name = ?1", [name])? == 0 {
             return Err(Error::NoSuchApp(name.to_owned()));
         }

@@ -69,6 +69,12 @@ impl Home {
         self.root.join("checkouts")
     }
 
+    /// Stand-ins for commands other tools call by name: `docker`, for
+    /// Railpack, is really Podman on the Mac.
+    pub fn shims(&self) -> PathBuf {
+        self.root.join("shims")
+    }
+
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
@@ -164,11 +170,22 @@ pub struct PressConfig {
     pub poll_seconds: u64,
     /// A build running longer than this is stopped and the release fails.
     pub build_timeout_minutes: u64,
+    /// The `railpack` binary, for repos without a Dockerfile. Unset: found on
+    /// PATH or in Homebrew's bin.
+    pub railpack: Option<std::path::PathBuf>,
+    /// The BuildKit image Railpack builds with, run as `henry-buildkit`.
+    pub buildkit_image: String,
 }
 
 impl Default for PressConfig {
     fn default() -> Self {
-        PressConfig { builder: None, poll_seconds: 60, build_timeout_minutes: 30 }
+        PressConfig {
+            builder: None,
+            poll_seconds: 60,
+            build_timeout_minutes: 30,
+            railpack: None,
+            buildkit_image: "moby/buildkit:v0.23.2".into(),
+        }
     }
 }
 
@@ -270,11 +287,27 @@ impl Default for LimitsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Ghost: which model plans onboardings, and how much it may spend.
+/// Provider keys are secrets: `henry secret set henry/META_API_KEY` (or
+/// GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY).
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AiConfig {
-    /// `provider/model`. Unset means Meta's default until Bench says otherwise.
+    /// `provider/model`, e.g. `meta/Llama-4-Maverick-17B-128E-Instruct-FP8`.
+    /// Unset: the first provider with a key, Meta first, at its default model.
     pub default_model: Option<String>,
+    /// Plans one onboarding may try before it is stuck.
+    pub max_rounds: i64,
+    /// Model tokens, in and out, one onboarding may spend.
+    pub max_tokens: u64,
+    /// Endpoint overrides by provider, e.g. `meta = "https://…/v1"`.
+    pub endpoints: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        AiConfig { default_model: None, max_rounds: 5, max_tokens: 2_000_000, endpoints: Default::default() }
+    }
 }
 
 impl Config {

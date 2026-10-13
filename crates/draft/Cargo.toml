@@ -1,0 +1,23 @@
+[package]
+name = "draft"
+description = "Onboarding: drafts a repo into an app, round by round, until it is live or stuck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canon.workspace = true
+getrandom.workspace = true
+ghost.workspace = true
+hex.workspace = true
+hush.workspace = true
+lease.workspace = true
+press.workspace = true
+sound.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

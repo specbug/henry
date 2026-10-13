@@ -80,9 +80,11 @@ fn fast() -> Settings {
 }
 
 /// A unique port range per test, so parallel tests never share responders.
+/// It stays below every OS's ephemeral range (32768 and up), where an
+/// unrelated outgoing connection could already hold the port.
 fn ports() -> std::ops::Range<u16> {
     static NEXT: std::sync::atomic::AtomicU16 = AtomicU16::new(0);
-    let base = 42000 + (std::process::id() % 200) as u16 * 100 + NEXT.fetch_add(10, Ordering::SeqCst);
+    let base = 21000 + (std::process::id() % 40) as u16 * 250 + NEXT.fetch_add(10, Ordering::SeqCst);
     base..base + 10
 }
 
@@ -294,4 +296,20 @@ async fn a_live_app_that_stops_answering_is_degraded_restarted_and_recovers() {
     let report = w.passes(1).await;
     assert_eq!(report.recovered, ["draw"]);
     assert_eq!(w.status(), (Status::Live, None));
+}
+
+#[tokio::test]
+async fn a_release_waiting_on_a_secret_is_not_timed_out() {
+    let w = world_with(Settings { start_timeout: Duration::from_millis(1), ..fast() });
+    let lease = LEASE.replace("depends_on = [\"db\"]", "depends_on = [\"db\"]\nsecrets = [\"SESSION_KEY\"]");
+    w.canon.update_lease(&Lease::parse(&lease).unwrap(), &lease, Source::Operator).unwrap();
+    let r = w.canon.create_release("draw", "sha", &lease).unwrap().id;
+    w.canon.set_release_state(r, ReleaseState::Trial, None).unwrap();
+    for _ in 0..3 {
+        w.plumb.pass().await.unwrap();
+        w.proof.pass().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(w.status().0, Status::NeedsYou);
+    assert_eq!(w.release(r).state, ReleaseState::Trial, "still waiting, not failed: {}", w.reason(r));
 }
