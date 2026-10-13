@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+#[derive(Clone)]
 pub struct Home {
     pub root: PathBuf,
 }
@@ -80,6 +81,40 @@ pub struct Config {
     pub limits: LimitsConfig,
     pub ai: AiConfig,
     pub engine: EngineConfig,
+    pub press: PressConfig,
+    pub http: HttpConfig,
+}
+
+/// Builds and deploys on push.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PressConfig {
+    /// The CLI that builds images: `podman` or `docker`. Unset: Podman on
+    /// macOS, otherwise whichever of the two is on PATH.
+    pub builder: Option<std::path::PathBuf>,
+    /// How often each auto-deploying app's branch is checked.
+    pub poll_seconds: u64,
+    /// A build running longer than this is stopped and the release fails.
+    pub build_timeout_minutes: u64,
+}
+
+impl Default for PressConfig {
+    fn default() -> Self {
+        PressConfig { builder: None, poll_seconds: 60, build_timeout_minutes: 30 }
+    }
+}
+
+/// Henry's own HTTP endpoint. Loopback only: Hinge exposes the webhook path.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HttpConfig {
+    pub listen: String,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        HttpConfig { listen: "127.0.0.1:7777".into() }
+    }
 }
 
 /// Where the containers run.

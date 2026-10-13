@@ -20,12 +20,16 @@ plain words.
 | Hush | `crates/hush` | sealed secrets |
 | Plumb | `crates/plumb` | reconcile loop (`plan.rs` is pure; `lib.rs` acts) |
 | Hold | `crates/hold` | `Runtime` + `Machine` traits, `Engine` (Docker API), `fake::Fake` |
-| Hinge | (milestone 3) | cloudflared + Caddy |
-| Proof | (milestone 4) | the Live gate |
-| Draft / Sound / Ghost | (milestone 5) | onboarding / AI-free scan / the AI |
-| Ark | (milestone 6) | backups |
-| Mend / Bench | (milestone 7) | upkeep / model eval |
-| Glass | (milestone 8) | web UI |
+| Press | `crates/press` | git checkouts, image builds, release on push (a Canon job) |
+| Hinge | (milestone 4) | cloudflared + Caddy |
+| Proof | (milestone 5) | the Live gate |
+| Draft / Sound / Ghost | (milestone 6) | onboarding / AI-free scan / the AI |
+| Ark | (milestone 7) | backups |
+| Mend / Bench | (milestone 8) | upkeep / model eval |
+| Glass | (milestone 9) | web UI |
+
+The daemon (`henry/src/daemon.rs`) runs Plumb on a tick and three side tasks:
+the job worker, Press's poll, and the loopback HTTP endpoint (`henry/src/http.rs`).
 
 ## Commands
 
@@ -63,6 +67,11 @@ the engine tests real.
   must act on nothing. Plumb retries once, then skips.
 - **A stateful service runs once.** Services with volumes get one container
   (`<app>-<service>`) replaced in place; never two against one volume.
+- **Git never prompts.** Every `git` call has a timeout and runs with prompts
+  disabled; a GitHub token travels in `GIT_CONFIG_*` env vars, never argv.
+- **A failed commit is seen, not retried.** Press records a failed release so
+  polling does not rebuild a broken commit forever; a new push or
+  `henry deploy` tries again.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.

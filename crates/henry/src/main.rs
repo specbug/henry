@@ -4,6 +4,7 @@ mod cli;
 mod daemon;
 mod home;
 mod host;
+mod http;
 mod launchd;
 mod time;
 

@@ -46,6 +46,14 @@ enum Cmd {
     Show { app: String },
     /// What the container engine is running for each app.
     Ps,
+    /// Build and try the app's branch now, or a given commit. The daemon does
+    /// the work; follow it with `henry show`.
+    Deploy {
+        app: String,
+        /// A commit to release instead of the branch head.
+        #[arg(long)]
+        commit: Option<String>,
+    },
     /// Try a release made of images that already exist. Plumb runs it beside
     /// the live release; only Proof can make it live.
     Trial {
@@ -115,6 +123,12 @@ pub fn run(args: Args) -> Result<ExitCode> {
         Cmd::Show { app } => show(&home, &app)?,
         Cmd::Events { app, limit } => events(&home, app.as_deref(), limit)?,
         Cmd::Ps => ps(&home)?,
+        Cmd::Deploy { app, commit } => {
+            let canon = canon(&home)?;
+            canon.app(&app)?;
+            let job = press::request(&canon, &app, commit.as_deref(), true)?;
+            println!("deploy of {app} queued (job {}); the daemon builds it", job.id);
+        }
         Cmd::Trial { app, images } => trial(&home, &app, &images)?,
         Cmd::Start { app } => canon(&home)?.set_desired(&app, Desired::Running)?,
         Cmd::Stop { app } => canon(&home)?.set_desired(&app, Desired::Stopped)?,
@@ -280,7 +294,9 @@ fn show(home: &Home, name: &str) -> Result<()> {
         println!("  releases");
         for r in releases {
             let sha = &r.commit_sha[..r.commit_sha.len().min(10)];
-            let reason = r.reason.map(|x| format!(" — {x}")).unwrap_or_default();
+            // The first line says what happened; the rest is a build log tail.
+            let reason =
+                r.reason.as_deref().and_then(|x| x.lines().next()).map(|x| format!(" — {x}")).unwrap_or_default();
             println!("    {:>5}  {sha:<10}  {:<10} {}{reason}", r.id, r.state, utc(r.created_at));
         }
     }

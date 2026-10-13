@@ -8,10 +8,10 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 2 of 9.** Henry runs apps: Plumb keeps containers in line
-> with Canon through crashes, reboots and engine restarts. It does not build
-> from source yet (Draft, milestone 5) or route public traffic (Hinge,
-> milestone 3). See [Build order](#build-order).
+> **Status: milestone 3 of 10.** Henry builds and runs your apps: every push is
+> fetched, built and run on trial, and Plumb keeps it running through crashes
+> and reboots. It does not yet route public traffic (Hinge, milestone 4) or
+> prove releases live (Proof, milestone 5). See [Build order](#build-order).
 
 ## The parts
 
@@ -21,21 +21,22 @@ something second about how.
 
 | Name | Part | Status |
 | --- | --- | --- |
-| **Henry** | The daemon and CLI | running Plumb |
+| **Henry** | The daemon and CLI | running Plumb and Press |
 | **Canon** | SQLite desired state: apps, routes, releases, jobs, events | done |
 | **Lease** | The per-app spec, `lease.toml`, and its policy checks | done |
 | **Hush** | Secrets, sealed at rest with a key in the macOS Keychain | done |
 | **Plumb** | The reconcile loop that closes drift | done |
 | **Hold** | The Podman VM and the runtime interface | done |
-| **Hinge** | cloudflared and Caddy: routes that swing atomically | milestone 3 |
-| **Proof** | The Live gate: soak, probes, restart test, public probe | milestone 4 |
-| **Draft** | Onboarding, from repo URL to Live | milestone 5 |
-| **Sound** | The repo scan that uses no AI | milestone 5 |
-| **Ghost** | The AI, which proposes and never decides | milestone 5 |
-| **Ark** | Backups to R2 with restic, and restore drills | milestone 6 |
-| **Mend** | The upkeep loop: upgrades with automatic rollback | milestone 7 |
-| **Bench** | The model eval that decides the default model | milestone 7 |
-| **Glass** | The web UI, behind Cloudflare Access | milestone 8 |
+| **Press** | Fetch, build and release on every push | done |
+| **Hinge** | cloudflared and Caddy: routes that swing atomically | milestone 4 |
+| **Proof** | The Live gate: soak, probes, restart test, public probe | milestone 5 |
+| **Draft** | Onboarding, from repo URL to Live | milestone 6 |
+| **Sound** | The repo scan that uses no AI | milestone 6 |
+| **Ghost** | The AI, which proposes and never decides | milestone 6 |
+| **Ark** | Backups to R2 with restic, and restore drills | milestone 7 |
+| **Mend** | The upkeep loop: upgrades with automatic rollback | milestone 8 |
+| **Bench** | The model eval that decides the default model | milestone 8 |
+| **Glass** | The web UI, behind Cloudflare Access | milestone 9 |
 
 ## A lease
 
@@ -76,6 +77,30 @@ engine has, and closes the gap.
 
 Published services listen on `127.0.0.1:20000-29999`, for Hinge to route to.
 
+## How a push becomes a release
+
+1. **Noticed.** GitHub's push webhook queues a deploy at once. A poll of every
+   auto-deploying branch (`git ls-remote`, every 60 seconds) catches anything
+   the webhook missed.
+2. **Fetched.** The exact commit lands in Henry's own checkout, cleaned of
+   everything else. Your working copies are never touched.
+3. **Leased.** A `lease.toml` committed in the repo wins over the stored one,
+   after the same policy checks. A bad one fails the release, not the app.
+4. **Built.** Each Dockerfile service is built with `podman build` (Mac) or
+   `docker build`, tagged by commit so the same commit never builds twice. A
+   failed build is retried once, then the release fails with the log's tail.
+5. **On trial.** The release replaces any older trial, and Plumb runs it beside
+   the live release. Only Proof can make it live.
+
+A commit that failed is not retried until a new push or `henry deploy`.
+
+To accept webhooks, set a secret and give GitHub the same one:
+
+```sh
+henry secret set henry/GITHUB_WEBHOOK_SECRET   # then point GitHub at /hooks/github
+henry secret set henry/GITHUB_TOKEN            # for private repos; never on argv
+```
+
 ## Using it
 
 ```sh
@@ -83,6 +108,7 @@ cargo build --release
 ./target/release/henry check lease.toml          # policy-check a lease
 ./target/release/henry add lease.toml --repo https://github.com/you/draw
 ./target/release/henry secret set draw/SESSION_KEY   # value read from stdin
+./target/release/henry deploy draw               # build and try the branch now
 ./target/release/henry trial draw                # try a release made of existing images
 ./target/release/henry ps                        # what the engine runs, per app
 ./target/release/henry apps                      # every app and its state
@@ -97,14 +123,15 @@ the paths; `HENRY_HOME` overrides them.
 ## Build order
 
 1. **Foundations** — Canon, Lease, Hush, CLI, daemon skeleton, launchd.
-2. **Hold and Plumb** — Podman runtime and the reconcile loop. *(this)*
-3. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS.
-4. **Proof** — the Live gate.
-5. **Draft, Sound, Ghost** — onboarding with AI, four providers.
-6. **Ark** — backups and restore drills.
-7. **Mend and Bench** — upkeep and model eval.
-8. **Glass** — the web UI.
-9. **Migration** — move odyssey and draw off hostd.
+2. **Hold and Plumb** — Podman runtime and the reconcile loop.
+3. **Press** — fetch, build and release on push. *(this)*
+4. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS.
+5. **Proof** — the Live gate.
+6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
+7. **Ark** — backups and restore drills.
+8. **Mend and Bench** — upkeep and model eval.
+9. **Glass** — the web UI.
+10. **Migration** — move odyssey and draw off hostd.
 
 ## Development
 
