@@ -100,6 +100,7 @@ pub struct Config {
     pub press: PressConfig,
     pub http: HttpConfig,
     pub hinge: HingeConfig,
+    pub proof: ProofConfig,
     /// Unset: no tunnel, and Caddy serves on loopback only.
     pub cloudflare: Option<CloudflareConfig>,
 }
@@ -168,6 +169,58 @@ pub struct PressConfig {
 impl Default for PressConfig {
     fn default() -> Self {
         PressConfig { builder: None, poll_seconds: 60, build_timeout_minutes: 30 }
+    }
+}
+
+/// The Live gate: how long a release must hold before it goes live, and how
+/// patient Henry is with a live app that stops answering.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProofConfig {
+    /// Minutes a release must run cleanly before its restart test.
+    pub soak_minutes: u64,
+    /// Passing health checks in a row, per service, the soak must end on.
+    pub streak: u32,
+    /// A soak that has not held after this long fails the release.
+    pub soak_limit_minutes: u64,
+    /// Failing checks in a row before a live app is Degraded.
+    pub degraded_after: u32,
+    /// Failing checks in a row before its container is restarted.
+    pub restart_after: u32,
+    /// More log lines that mean a crash, on top of the built-in ones.
+    pub signatures: Vec<String>,
+}
+
+impl Default for ProofConfig {
+    fn default() -> Self {
+        let d = proof::Settings::default();
+        ProofConfig {
+            soak_minutes: d.soak.as_secs() / 60,
+            streak: d.streak,
+            soak_limit_minutes: d.soak_limit.as_secs() / 60,
+            degraded_after: d.degraded_after,
+            restart_after: d.restart_after,
+            signatures: vec![],
+        }
+    }
+}
+
+impl ProofConfig {
+    /// Proof's settings. `proxy` is Caddy's listen address, so public routes
+    /// are checked end to end.
+    pub fn settings(&self, proxy: &str) -> proof::Settings {
+        let mut s = proof::Settings {
+            soak: std::time::Duration::from_secs(self.soak_minutes * 60),
+            streak: self.streak.max(1),
+            // The streak needs time to build after the soak.
+            soak_limit: std::time::Duration::from_secs(self.soak_limit_minutes.max(self.soak_minutes + 10) * 60),
+            degraded_after: self.degraded_after.max(1),
+            restart_after: self.restart_after.max(self.degraded_after.max(1)),
+            proxy: Some(proxy.to_owned()),
+            ..proof::Settings::default()
+        };
+        s.signatures.extend(self.signatures.iter().cloned());
+        s
     }
 }
 

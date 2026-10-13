@@ -486,6 +486,25 @@ impl Canon {
         Ok(Wanted { live, candidate })
     }
 
+    // --- proofs ----------------------------------------------------------
+
+    /// Proof's saved progress on a release, if it has started.
+    pub fn proof(&self, release: i64) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn()?;
+        let text: Option<String> =
+            conn.query_row("SELECT state FROM proofs WHERE release = ?1", [release], |r| r.get(0)).optional()?;
+        Ok(text.map(json))
+    }
+
+    pub fn put_proof(&self, release: i64, app: &str, state: &serde_json::Value) -> Result<()> {
+        self.conn()?.execute(
+            "INSERT INTO proofs (release, app, state, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (release) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+            params![release, app, state.to_string(), now_ms()],
+        )?;
+        Ok(())
+    }
+
     // --- host ports ------------------------------------------------------
 
     /// The host port for one service slot, allocating the lowest free port in

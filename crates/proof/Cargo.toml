@@ -1,0 +1,23 @@
+[package]
+name = "proof"
+description = "The Live gate: a release becomes live by enduring, not by argument"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canon.workspace = true
+futures-util.workspace = true
+hold.workspace = true
+lease.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hush.workspace = true
+plumb.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

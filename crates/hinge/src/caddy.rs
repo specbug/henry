@@ -11,6 +11,9 @@ use canon::serde_json::{self, Value, json};
 
 use crate::{Error, Proxy, Result, Route};
 
+/// The header on Caddy's catch-all 404.
+pub const NO_ROUTE_HEADER: &str = "X-Henry-Route";
+
 pub struct Caddy {
     /// The admin endpoint, e.g. `http://127.0.0.1:2019`.
     pub admin: String,
@@ -53,8 +56,14 @@ impl Caddy {
                 })
             })
             .collect();
-        // Anything no route claims gets a 404, not Caddy's empty 200.
-        routes.push(json!({ "handle": [{ "handler": "static_response", "status_code": 404 }] }));
+        // Anything no route claims gets a 404, not Caddy's empty 200, marked
+        // so Proof can tell "no route" from an app's own 404.
+        routes.push(json!({ "handle": [{
+            "handler": "static_response",
+            "status_code": 404,
+            "headers": { "X-Henry-Route": ["none"] },
+            "body": "no route\n",
+        }] }));
         json!({
             "admin": { "listen": admin_listen },
             "apps": { "http": { "servers": { "henry": {

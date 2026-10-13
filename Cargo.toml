@@ -18,12 +18,13 @@ hinge = { path = "crates/hinge" }
 hold = { path = "crates/hold" }
 plumb = { path = "crates/plumb" }
 press = { path = "crates/press" }
+proof = { path = "crates/proof" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 base64 = "0.22"
 bollard = "0.21"
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 getrandom = "0.3"

@@ -352,6 +352,7 @@ fn show(home: &Home, name: &str) -> Result<()> {
 
 fn ps(home: &Home) -> Result<()> {
     let config = Config::load(&home.config())?;
+    let canon = canon(home)?;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let containers = rt.block_on(async {
         let engine = Host::from_config(&config.engine)?.connect().await?;
@@ -362,12 +363,17 @@ fn ps(home: &Home) -> Result<()> {
         return Ok(());
     }
     println!("{:<28} {:<10} {:<10} RELEASE", "CONTAINER", "STATE", "ROLE");
-    for (_, list) in plumb::by_app(&containers) {
+    for (app, list) in plumb::by_app(&containers) {
+        let live = canon.app(&app).ok().and_then(|a| a.live_release).map(|r| r.to_string());
         for c in list {
             let state = format!("{:?}", c.state).to_lowercase();
-            let role = c.label(hold::label::ROLE).unwrap_or("-");
-            let release = c.label(hold::label::RELEASE).unwrap_or("-");
-            println!("{:<28} {:<10} {:<10} {release}", c.name, state, role);
+            let release = c.label(hold::label::RELEASE);
+            let role = match release {
+                None => "stateful",
+                Some(r) if Some(r) == live.as_deref() => "live",
+                Some(_) => "candidate",
+            };
+            println!("{:<28} {:<10} {:<10} {}", c.name, state, role, release.unwrap_or("-"));
         }
     }
     Ok(())
@@ -407,7 +413,7 @@ fn trial(home: &Home, name: &str, overrides: &[String]) -> Result<()> {
     let release = canon.create_release(name, "images", &app.lease)?;
     canon.set_release_images(release.id, &serde_json::Value::Object(images))?;
     canon.set_release_state(release.id, ReleaseState::Trial, Some("tried by hand from existing images"))?;
-    println!("release {} is on trial; Plumb starts it on its next pass", release.id);
+    println!("release {} is on trial; Plumb starts it and Proof decides whether it goes live", release.id);
     Ok(())
 }
 

@@ -18,6 +18,10 @@ pub struct FakeContainer {
     pub state: State,
     pub labels: Labels,
     pub restarts: i64,
+    pub aliases: Vec<String>,
+    /// Log lines with the Unix second they were written.
+    pub logs: Vec<(i64, String)>,
+    pub oom_killed: bool,
 }
 
 #[derive(Default)]
@@ -98,6 +102,36 @@ impl Fake {
         });
     }
 
+    /// The engine restarts the container after it crashes: it keeps running,
+    /// but its restart count goes up.
+    pub fn bounce(&self, name: &str) {
+        self.with(|i| {
+            if let Some(c) = i.containers.values_mut().find(|c| c.spec.name == name) {
+                c.restarts += 1;
+            }
+        });
+    }
+
+    /// The container writes a log line now.
+    pub fn log(&self, name: &str, line: &str) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        self.with(|i| {
+            if let Some(c) = i.containers.values_mut().find(|c| c.spec.name == name) {
+                c.logs.push((now, line.to_owned()));
+            }
+        });
+    }
+
+    /// The kernel killed the container for using too much memory.
+    pub fn oom(&self, name: &str) {
+        self.with(|i| {
+            if let Some(c) = i.containers.values_mut().find(|c| c.spec.name == name) {
+                c.state = State::Exited;
+                c.oom_killed = true;
+            }
+        });
+    }
+
     /// The engine (and its VM) goes away.
     pub fn set_down(&self, down: bool) {
         self.with(|i| i.down = down);
@@ -122,7 +156,19 @@ impl Fake {
                 memory_bytes: 0,
                 cpus: 0.0,
             };
-            i.containers.insert(id.clone(), FakeContainer { id, spec, state: State::Running, labels, restarts: 0 });
+            i.containers.insert(
+                id.clone(),
+                FakeContainer {
+                    id,
+                    spec,
+                    state: State::Running,
+                    labels,
+                    restarts: 0,
+                    aliases: vec![],
+                    logs: vec![],
+                    oom_killed: false,
+                },
+            );
         });
     }
 
@@ -155,6 +201,7 @@ impl Runtime for Fake {
                     name: c.spec.name.clone(),
                     state: c.state,
                     labels: c.labels.clone(),
+                    networks: [(c.spec.network.clone(), c.aliases.clone())].into_iter().collect(),
                 })
                 .collect())
         })
@@ -209,7 +256,16 @@ impl Runtime for Fake {
             labels.insert(label::SPEC.into(), spec.hash());
             i.containers.insert(
                 id.clone(),
-                FakeContainer { id: id.clone(), spec: spec.clone(), state: State::Created, labels, restarts: 0 },
+                FakeContainer {
+                    id: id.clone(),
+                    spec: spec.clone(),
+                    state: State::Created,
+                    labels,
+                    restarts: 0,
+                    aliases: spec.aliases.clone(),
+                    logs: vec![],
+                    oom_killed: false,
+                },
             );
             i.ops.push(format!("create {}", spec.name));
             Ok(id)
@@ -256,6 +312,17 @@ impl Runtime for Fake {
         Ok(())
     }
 
+    async fn set_aliases(&self, id: &str, _network: &str, aliases: &[String]) -> Result<()> {
+        self.up()?;
+        self.with(|i| {
+            let c = find(i, id)?;
+            c.aliases = aliases.to_vec();
+            let name = c.spec.name.clone();
+            i.ops.push(format!("aliases {name} {}", aliases.join(",")));
+            Ok(())
+        })
+    }
+
     async fn inspect(&self, id: &str) -> Result<Inspection> {
         self.up()?;
         self.with(|i| {
@@ -263,15 +330,20 @@ impl Runtime for Fake {
             Ok(Inspection {
                 state: c.state,
                 restart_count: c.restarts,
-                exit_code: (c.state == State::Exited).then_some(1),
-                oom_killed: false,
+                exit_code: (c.state == State::Exited).then_some(if c.oom_killed { 137 } else { 1 }),
+                oom_killed: c.oom_killed,
             })
         })
     }
 
-    async fn logs(&self, id: &str, _tail: usize) -> Result<String> {
+    async fn logs(&self, id: &str, tail: usize, since: Option<i64>) -> Result<String> {
         self.up()?;
-        self.with(|i| find(i, id).map(|c| format!("logs of {}\n", c.spec.name)))
+        self.with(|i| {
+            let c = find(i, id)?;
+            let lines: Vec<&str> =
+                c.logs.iter().filter(|(t, _)| since.is_none_or(|s| *t >= s)).map(|(_, l)| l.as_str()).collect();
+            Ok(lines[lines.len().saturating_sub(tail)..].iter().map(|l| format!("{l}\n")).collect())
+        })
     }
 }
 

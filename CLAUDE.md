@@ -22,13 +22,13 @@ plain words.
 | Hold | `crates/hold` | `Runtime` + `Machine` traits, `Engine` (Docker API), `fake::Fake` |
 | Press | `crates/press` | git checkouts, image builds, release on push (a Canon job) |
 | Hinge | `crates/hinge` | Caddy routes (admin API) + Cloudflare tunnel ingress and DNS; `henry/src/edge.rs` builds it |
-| Proof | (milestone 5) | the Live gate |
+| Proof | `crates/proof` | the Live gate: staged trials saved in Canon, probes, live watch |
 | Draft / Sound / Ghost | (milestone 6) | onboarding / AI-free scan / the AI |
 | Ark | (milestone 7) | backups |
 | Mend / Bench | (milestone 8) | upkeep / model eval |
 | Glass | (milestone 9) | web UI |
 
-The daemon (`henry/src/daemon.rs`) runs Plumb then Hinge on a tick and three side tasks:
+The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, then Hinge on a tick and three side tasks:
 the job worker, Press's poll, and the loopback HTTP endpoint (`henry/src/http.rs`).
 
 ## Commands
@@ -77,9 +77,14 @@ the engine tests real.
   trial is never routed.
 - **DNS: touch only what Henry made.** Records Henry creates carry the comment
   `managed by henry`; anything else is reported, never edited or deleted.
-- **Promotion must not recreate the proven container.** Today the live role
-  adds a network alias, which changes the spec hash and recreates it. Proof
-  (milestone 5) must move aliases in place instead.
+- **Only Proof marks a release Live.** Nothing else calls
+  `set_release_state(.., Live, ..)`; no CLI command, no AI output.
+- **Promotion never recreates the proven container.** Aliases are out of the
+  spec hash; Plumb moves them in place with `Runtime::set_aliases`.
+- **A trial survives a restart.** Proof saves its stage after every pass in the
+  `proofs` table; in-memory state is only the live watch's failure counts.
+- **Proof writes Degraded; Plumb does not overwrite it.** Down (containers not
+  running) is Plumb's word and outranks Degraded.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.

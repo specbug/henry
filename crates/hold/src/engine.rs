@@ -9,8 +9,8 @@ use bollard::Docker;
 use bollard::errors::Error as BollardError;
 use bollard::models::{
     ContainerCreateBody, ContainerStateStatusEnum, ContainerSummaryStateEnum, EndpointSettings, HostConfig,
-    Mount as EngineMount, MountType, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy,
-    RestartPolicyNameEnum, VolumeCreateRequest,
+    Mount as EngineMount, MountType, NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest,
+    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
@@ -64,21 +64,40 @@ impl Runtime for Engine {
         let filters = HashMap::from([("label", vec![format!("{}=1", label::MANAGED)])]);
         let opts = ListContainersOptionsBuilder::new().all(true).filters(&filters).build();
         let found = self.docker.list_containers(Some(opts)).await.map_err(|e| map("list containers", e))?;
-        Ok(found
-            .into_iter()
-            .filter_map(|c| {
-                let name = c.names?.into_iter().next()?.trim_start_matches('/').to_owned();
-                let state = match c.state {
-                    Some(ContainerSummaryStateEnum::CREATED) => State::Created,
-                    Some(ContainerSummaryStateEnum::RUNNING) => State::Running,
-                    Some(ContainerSummaryStateEnum::PAUSED) => State::Paused,
-                    Some(ContainerSummaryStateEnum::RESTARTING) => State::Restarting,
-                    Some(ContainerSummaryStateEnum::EXITED) => State::Exited,
-                    _ => State::Other,
-                };
-                Some(Container { id: c.id?, name, state, labels: c.labels.unwrap_or_default().into_iter().collect() })
-            })
-            .collect())
+        let mut out = Vec::with_capacity(found.len());
+        for c in found {
+            let (Some(id), Some(name)) = (c.id, c.names.and_then(|n| n.into_iter().next())) else { continue };
+            let state = match c.state {
+                Some(ContainerSummaryStateEnum::CREATED) => State::Created,
+                Some(ContainerSummaryStateEnum::RUNNING) => State::Running,
+                Some(ContainerSummaryStateEnum::PAUSED) => State::Paused,
+                Some(ContainerSummaryStateEnum::RESTARTING) => State::Restarting,
+                Some(ContainerSummaryStateEnum::EXITED) => State::Exited,
+                _ => State::Other,
+            };
+            let listed = c.network_settings.and_then(|n| n.networks).unwrap_or_default();
+            // Docker's listing leaves aliases out; only inspect has them.
+            let networks = if listed.values().any(|ep| ep.aliases.is_none()) {
+                let detail = self.docker.inspect_container(&id, None).await.map_err(|e| map(&name, e))?;
+                detail
+                    .network_settings
+                    .and_then(|n| n.networks)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(net, ep)| (net, ep.aliases.unwrap_or_default()))
+                    .collect()
+            } else {
+                listed.into_iter().map(|(net, ep)| (net, ep.aliases.unwrap_or_default())).collect()
+            };
+            out.push(Container {
+                id,
+                name: name.trim_start_matches('/').to_owned(),
+                state,
+                labels: c.labels.unwrap_or_default().into_iter().collect(),
+                networks,
+            });
+        }
+        Ok(out)
     }
 
     async fn ensure_network(&self, name: &str, labels: &Labels) -> Result<()> {
@@ -207,6 +226,19 @@ impl Runtime for Engine {
         }
     }
 
+    async fn set_aliases(&self, id: &str, network: &str, aliases: &[String]) -> Result<()> {
+        let off = NetworkDisconnectRequest { container: id.to_owned(), force: Some(true) };
+        match self.docker.disconnect_network(network, off).await {
+            Ok(()) | Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {}
+            Err(e) => return Err(map(network, e)),
+        }
+        let on = NetworkConnectRequest {
+            container: id.to_owned(),
+            endpoint_config: Some(EndpointSettings { aliases: Some(aliases.to_vec()), ..Default::default() }),
+        };
+        self.docker.connect_network(network, on).await.map_err(|e| map(network, e))
+    }
+
     async fn inspect(&self, id: &str) -> Result<Inspection> {
         let c = self.docker.inspect_container(id, None).await.map_err(|e| map(id, e))?;
         let s = c.state.unwrap_or_default();
@@ -226,8 +258,12 @@ impl Runtime for Engine {
         })
     }
 
-    async fn logs(&self, id: &str, tail: usize) -> Result<String> {
-        let opts = LogsOptionsBuilder::new().stdout(true).stderr(true).tail(&tail.to_string()).build();
+    async fn logs(&self, id: &str, tail: usize, since: Option<i64>) -> Result<String> {
+        let mut opts = LogsOptionsBuilder::new().stdout(true).stderr(true).tail(&tail.to_string());
+        if let Some(since) = since {
+            opts = opts.since(since as i32);
+        }
+        let opts = opts.build();
         let chunks = self.docker.logs(id, Some(opts)).try_collect::<Vec<_>>().await.map_err(|e| map(id, e))?;
         Ok(chunks.iter().map(ToString::to_string).collect())
     }

@@ -68,6 +68,8 @@ pub struct Report {
     pub created: Vec<String>,
     pub recreated: Vec<String>,
     pub started: Vec<String>,
+    /// Running containers whose network aliases were changed in place.
+    pub realiased: Vec<String>,
     pub removed: Vec<String>,
     pub failed: Vec<(String, String)>,
     /// Containers not started because something they depend on is not up.
@@ -81,6 +83,7 @@ impl Report {
         self.created.is_empty()
             && self.recreated.is_empty()
             && self.started.is_empty()
+            && self.realiased.is_empty()
             && self.removed.is_empty()
             && self.failed.is_empty()
             && self.waiting.is_empty()
@@ -293,6 +296,29 @@ impl<R: Runtime, M: Machine> Plumb<R, M> {
         let current = found.filter(|c| c.spec_hash() == Some(hash.as_str()));
         if is_current(planned, found) {
             self.clear_backoff(name);
+            // Going live changes only the names it answers to. Move them in
+            // place: the container Proof just proved is the one that serves.
+            if let Some(c) = found
+                && aliases_differ(planned, c)
+            {
+                match self.runtime.set_aliases(&c.id, &planned.spec.network, &planned.spec.aliases).await {
+                    Ok(()) => {
+                        report.realiased.push(name.clone());
+                        let what = if planned.spec.aliases.is_empty() {
+                            "no alias".to_owned()
+                        } else {
+                            planned.spec.aliases.join(", ")
+                        };
+                        self.canon.record(
+                            Some(app),
+                            "container.aliases",
+                            &format!("{name} now answers to {what}"),
+                            &serde_json::Value::Null,
+                        )?;
+                    }
+                    Err(e) => report.failed.push((name.clone(), e.to_string())),
+                }
+            }
             return Ok(true);
         }
         if !self.may_try(name) {
@@ -359,7 +385,11 @@ impl<R: Runtime, M: Machine> Plumb<R, M> {
         let app = self.canon.app(&plan.app)?;
         if plan.has_live {
             if down.is_empty() {
-                self.canon.set_status(&plan.app, Status::Live, None)?;
+                // Degraded belongs to Proof's health checks: running is not
+                // the same as healthy, so Plumb does not clear it.
+                if app.status != Status::Degraded {
+                    self.canon.set_status(&plan.app, Status::Live, None)?;
+                }
             } else {
                 self.canon.set_status(&plan.app, Status::Down, Some(&format!("{} not running", down.join(", "))))?;
             }
@@ -424,6 +454,15 @@ impl<R: Runtime, M: Machine> Plumb<R, M> {
     fn clear_backoff(&self, name: &str) {
         self.backoff.lock().unwrap().remove(name);
     }
+}
+
+/// Whether the service name it answers to is not what the plan says. Only
+/// the service's own name is ever an alias, so that is all compared.
+fn aliases_differ(planned: &Planned, c: &Container) -> bool {
+    let have = c.networks.get(&planned.spec.network).map(Vec::as_slice).unwrap_or_default();
+    let answers = have.contains(&planned.service);
+    let should = planned.spec.aliases.contains(&planned.service);
+    answers != should
 }
 
 /// Running, and built from exactly this spec.
