@@ -516,6 +516,19 @@ impl Canon {
         Ok(port)
     }
 
+    /// The host port already given to a slot, without allocating one.
+    pub fn existing_port(&self, app: &str, service: &str, slot: i64) -> Result<Option<u16>> {
+        let conn = self.conn()?;
+        let port: Option<i64> = conn
+            .query_row(
+                "SELECT host_port FROM ports WHERE app = ?1 AND service = ?2 AND slot = ?3",
+                params![app, service, slot],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(port.map(|p| p as u16))
+    }
+
     /// Release every port of `app` whose slot is not in `keep`.
     pub fn free_ports(&self, app: &str, keep: &[(String, i64)]) -> Result<usize> {
         let conn = self.conn()?;

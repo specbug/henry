@@ -1,0 +1,174 @@
+//! The Cloudflare side of the tunnel: its ingress rules and the DNS records
+//! that point hostnames at it.
+//!
+//! DNS is touched carefully. Henry tags every record it creates with
+//! [`MANAGED`], and only ever edits or deletes records carrying that tag. A
+//! record you made by hand is reported, never overwritten.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use canon::serde_json::{Value, json};
+
+use crate::{Error, Result, Tunnel};
+
+/// The comment on every DNS record Henry owns.
+pub const MANAGED: &str = "managed by henry";
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DnsReport {
+    pub created: Vec<String>,
+    pub updated: Vec<String>,
+    pub deleted: Vec<String>,
+    /// Hosts Henry wanted but did not touch, and why.
+    pub skipped: Vec<(String, String)>,
+}
+
+pub struct Cloudflare {
+    /// `https://api.cloudflare.com/client/v4`, or a test server.
+    pub base: String,
+    pub account: String,
+    pub tunnel: String,
+    /// The zones Henry may manage records in, e.g. `example.com`.
+    pub zones: Vec<String>,
+    token: String,
+    client: reqwest::Client,
+    zone_ids: Mutex<BTreeMap<String, String>>,
+}
+
+impl Cloudflare {
+    pub fn new(base: &str, account: &str, tunnel: &str, zones: Vec<String>, token: &str) -> Cloudflare {
+        let client =
+            reqwest::Client::builder().timeout(Duration::from_secs(30)).build().expect("an HTTPS client always builds");
+        Cloudflare {
+            base: base.trim_end_matches('/').to_owned(),
+            account: account.to_owned(),
+            tunnel: tunnel.to_owned(),
+            zones,
+            token: token.to_owned(),
+            client,
+            zone_ids: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Where a tunnel's hostnames point.
+    pub fn target(&self) -> String {
+        format!("{}.cfargotunnel.com", self.tunnel)
+    }
+
+    async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
+        let mut req = self.client.request(method, format!("{}{path}", self.base)).bearer_auth(&self.token);
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        let res = req.send().await.map_err(|e| Error::Unreachable("Cloudflare", e.to_string()))?;
+        let status = res.status();
+        let value: Value = res.json().await.unwrap_or(Value::Null);
+        if !status.is_success() || value["success"] != Value::Bool(true) {
+            let errors = value["errors"].to_string();
+            return Err(Error::Refused("Cloudflare", format!("{status} on {path}: {errors}")));
+        }
+        Ok(value)
+    }
+
+    /// The configured zone a host belongs to: the longest suffix match.
+    fn zone_of(&self, host: &str) -> Option<&str> {
+        self.zones
+            .iter()
+            .filter(|z| host == z.as_str() || host.ends_with(&format!(".{z}")))
+            .max_by_key(|z| z.len())
+            .map(String::as_str)
+    }
+
+    async fn zone_id(&self, zone: &str) -> Result<String> {
+        if let Some(id) = self.zone_ids.lock().unwrap().get(zone) {
+            return Ok(id.clone());
+        }
+        let found = self.call(reqwest::Method::GET, &format!("/zones?name={zone}"), None).await?;
+        let id = found["result"][0]["id"]
+            .as_str()
+            .ok_or_else(|| Error::Refused("Cloudflare", format!("no zone `{zone}` on this account")))?
+            .to_owned();
+        self.zone_ids.lock().unwrap().insert(zone.to_owned(), id.clone());
+        Ok(id)
+    }
+
+    /// Every CNAME in a zone, by name: (id, content, comment).
+    async fn cnames(&self, zone_id: &str) -> Result<BTreeMap<String, (String, String, String)>> {
+        let mut out = BTreeMap::new();
+        let mut page = 1;
+        loop {
+            let res = self
+                .call(
+                    reqwest::Method::GET,
+                    &format!("/zones/{zone_id}/dns_records?type=CNAME&per_page=100&page={page}"),
+                    None,
+                )
+                .await?;
+            for r in res["result"].as_array().into_iter().flatten() {
+                let s = |k: &str| r[k].as_str().unwrap_or_default().to_owned();
+                out.insert(s("name"), (s("id"), s("content"), s("comment")));
+            }
+            let pages = res["result_info"]["total_pages"].as_u64().unwrap_or(1);
+            if page >= pages {
+                return Ok(out);
+            }
+            page += 1;
+        }
+    }
+}
+
+impl Tunnel for Cloudflare {
+    async fn set_ingress(&self, hosts: &[String], origin: &str) -> Result<()> {
+        let mut ingress: Vec<Value> = hosts.iter().map(|h| json!({ "hostname": h, "service": origin })).collect();
+        // cloudflared requires the last rule to match everything.
+        ingress.push(json!({ "service": "http_status:404" }));
+        let path = format!("/accounts/{}/cfd_tunnel/{}/configurations", self.account, self.tunnel);
+        self.call(reqwest::Method::PUT, &path, Some(json!({ "config": { "ingress": ingress } }))).await?;
+        Ok(())
+    }
+
+    async fn sync_dns(&self, hosts: &[String]) -> Result<DnsReport> {
+        let mut report = DnsReport::default();
+        let target = self.target();
+        let mut by_zone: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for host in hosts {
+            match self.zone_of(host) {
+                Some(zone) => by_zone.entry(zone).or_default().push(host),
+                None => report.skipped.push((host.clone(), "not in any zone listed in [cloudflare] zones".into())),
+            }
+        }
+        for zone in &self.zones {
+            let id = self.zone_id(zone).await?;
+            let existing = self.cnames(&id).await?;
+            let wanted = by_zone.get(zone.as_str()).cloned().unwrap_or_default();
+            for host in &wanted {
+                let record = json!({ "type": "CNAME", "name": host, "content": target, "proxied": true, "ttl": 1, "comment": MANAGED });
+                match existing.get(host.as_str()) {
+                    None => {
+                        self.call(reqwest::Method::POST, &format!("/zones/{id}/dns_records"), Some(record)).await?;
+                        report.created.push((*host).clone());
+                    }
+                    Some((_, content, _)) if *content == target => {}
+                    Some((rid, _, comment)) if comment == MANAGED => {
+                        self.call(reqwest::Method::PUT, &format!("/zones/{id}/dns_records/{rid}"), Some(record))
+                            .await?;
+                        report.updated.push((*host).clone());
+                    }
+                    Some((_, content, _)) => report.skipped.push((
+                        (*host).clone(),
+                        format!("a record you made points it at {content}; Henry will not overwrite it"),
+                    )),
+                }
+            }
+            for (name, (rid, _, comment)) in &existing {
+                if comment == MANAGED && !wanted.contains(&name) {
+                    self.call(reqwest::Method::DELETE, &format!("/zones/{id}/dns_records/{rid}"), None).await?;
+                    report.deleted.push(name.clone());
+                }
+            }
+        }
+        Ok(report)
+    }
+}

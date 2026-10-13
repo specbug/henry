@@ -35,7 +35,7 @@ impl Home {
 
     /// Create the directory tree, private to you.
     pub fn ensure(&self) -> Result<()> {
-        for dir in [self.root.clone(), self.checkouts(), self.logs()] {
+        for dir in [self.root.clone(), self.checkouts(), self.logs(), self.caddy_dir()] {
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             #[cfg(unix)]
             {
@@ -72,6 +72,22 @@ impl Home {
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
+
+    /// Caddy's own state: its autosaved config, so `--resume` brings routes back.
+    pub fn caddy_dir(&self) -> PathBuf {
+        self.root.join("caddy")
+    }
+
+    /// The config Caddy boots with before its first resume: just the admin
+    /// endpoint, so Hinge can reach it.
+    pub fn caddy_boot(&self) -> PathBuf {
+        self.caddy_dir().join("boot.json")
+    }
+
+    /// The tunnel token, for cloudflared's `--token-file`. Mode 0600.
+    pub fn tunnel_token(&self) -> PathBuf {
+        self.root.join("tunnel.token")
+    }
 }
 
 /// `henry.toml`. Every field has a default, so the file is optional.
@@ -83,6 +99,57 @@ pub struct Config {
     pub engine: EngineConfig,
     pub press: PressConfig,
     pub http: HttpConfig,
+    pub hinge: HingeConfig,
+    /// Unset: no tunnel, and Caddy serves on loopback only.
+    pub cloudflare: Option<CloudflareConfig>,
+}
+
+/// Caddy, the proxy every request passes through on the Mac.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HingeConfig {
+    pub caddy: std::path::PathBuf,
+    /// Caddy's admin endpoint.
+    pub admin: String,
+    /// Where Caddy listens for the tunnel.
+    pub listen: String,
+    /// A public hostname for Henry's own endpoints. GitHub's webhook goes to
+    /// `https://<hooks_host>/hooks/github`.
+    pub hooks_host: Option<String>,
+}
+
+impl Default for HingeConfig {
+    fn default() -> Self {
+        HingeConfig {
+            caddy: "/opt/homebrew/bin/caddy".into(),
+            admin: "http://127.0.0.1:2019".into(),
+            listen: "127.0.0.1:8080".into(),
+            hooks_host: None,
+        }
+    }
+}
+
+/// The tunnel. Its API token is `henry/CLOUDFLARE_API_TOKEN` and the token
+/// cloudflared runs with is `henry/CLOUDFLARE_TUNNEL_TOKEN`, both in Hush.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareConfig {
+    pub account: String,
+    pub tunnel: String,
+    /// Zones Henry may create DNS records in, e.g. `["example.com"]`.
+    pub zones: Vec<String>,
+    #[serde(default = "default_cloudflared")]
+    pub cloudflared: std::path::PathBuf,
+    #[serde(default = "default_api")]
+    pub api: String,
+}
+
+fn default_cloudflared() -> std::path::PathBuf {
+    "/opt/homebrew/bin/cloudflared".into()
+}
+
+fn default_api() -> String {
+    "https://api.cloudflare.com/client/v4".into()
 }
 
 /// Builds and deploys on push.

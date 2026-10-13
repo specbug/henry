@@ -15,7 +15,7 @@ use lease::{Lease, Refusal};
 use crate::home::{Config, Home};
 use crate::host::Host;
 use crate::time::utc;
-use crate::{daemon, launchd};
+use crate::{daemon, edge, launchd};
 
 #[derive(Parser)]
 #[command(name = "henry", version, about = "Rules the home: hosts your GitHub repos on this Mac")]
@@ -83,14 +83,19 @@ enum Cmd {
     /// Set, list or remove secrets.
     #[command(subcommand)]
     Secret(SecretCmd),
-    /// Install Henry as a LaunchAgent so it starts at login and stays up.
+    /// Install Henry, Caddy and (with [cloudflare]) cloudflared as LaunchAgents,
+    /// so they start at login and stay up.
     Install {
-        /// Print the agent instead of installing it.
+        /// Print the agents instead of installing them.
         #[arg(long)]
         print: bool,
     },
-    /// Remove the LaunchAgent. Apps keep running until the Mac restarts.
+    /// Remove the LaunchAgents. Apps keep running until the Mac restarts.
     Uninstall,
+    /// The public routes Henry wants, from Canon and config.
+    Routes,
+    /// Tell the running daemon to reread henry.toml and Henry's own secrets.
+    Reload,
     /// Show where Henry keeps its files.
     Where,
 }
@@ -142,17 +147,55 @@ pub fn run(args: Args) -> Result<ExitCode> {
         Cmd::Secret(cmd) => secret(&home, cmd)?,
         Cmd::Install { print } => {
             let binary = std::env::current_exe()?.canonicalize()?;
+            let config = Config::load(&home.config())?;
+            let mut agents = vec![launchd::caddy(&home, &config), launchd::henry(&binary, &home)];
+            if let Some(cf) = &config.cloudflare {
+                agents.insert(1, launchd::cloudflared(&home, &cf.cloudflared));
+            }
             if print {
-                print!("{}", launchd::plist(&binary, &home));
+                for a in &agents {
+                    println!("<!-- {} -->\n{}", a.label, a.plist());
+                }
             } else {
-                home.ensure()?;
-                let path = launchd::install(&binary, &home)?;
-                println!("installed {} and started Henry", path.display());
+                let canon = Arc::new(canon(&home)?);
+                let hush = open_hush(&home, canon)?;
+                edge::prepare(&home, &config, &hush)?;
+                if config.cloudflare.is_some() && !home.tunnel_token().exists() {
+                    bail!("set henry/{} before installing the tunnel", edge::TUNNEL_TOKEN);
+                }
+                for a in &agents {
+                    let path = launchd::install(a)?;
+                    println!("installed {}", path.display());
+                }
             }
         }
         Cmd::Uninstall => {
-            launchd::uninstall()?;
-            println!("uninstalled the LaunchAgent");
+            for label in [launchd::LABEL, launchd::CLOUDFLARED, launchd::CADDY] {
+                launchd::uninstall(label)?;
+            }
+            println!("uninstalled Henry's LaunchAgents");
+        }
+        Cmd::Routes => {
+            let config = Config::load(&home.config())?;
+            let mut routes = edge::own_routes(&config)?;
+            routes.extend(hinge::desired(&canon(&home)?)?);
+            if routes.is_empty() {
+                println!("no public routes: an app is routed once a release of it is live");
+            }
+            for r in routes {
+                println!("https://{}{:<20} → 127.0.0.1:{:<6} {}", r.host, r.path, r.upstream, r.owner);
+            }
+        }
+        Cmd::Reload => {
+            let pid: i32 = std::fs::read_to_string(home.lock())
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .context("Henry does not seem to be running")?;
+            // SAFETY: sending a signal to a pid read from Henry's own lock file.
+            if unsafe { libc::kill(pid, libc::SIGHUP) } != 0 {
+                bail!("could not signal Henry (pid {pid}); is it running?");
+            }
+            println!("asked Henry (pid {pid}) to reload");
         }
         Cmd::Where => {
             println!("home       {}", home.root.display());

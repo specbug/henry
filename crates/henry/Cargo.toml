@@ -12,6 +12,7 @@ axum.workspace = true
 canon.workspace = true
 clap.workspace = true
 hex.workspace = true
+hinge.workspace = true
 hmac.workspace = true
 hold.workspace = true
 hush.workspace = true

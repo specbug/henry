@@ -8,10 +8,10 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 3 of 10.** Henry builds and runs your apps: every push is
-> fetched, built and run on trial, and Plumb keeps it running through crashes
-> and reboots. It does not yet route public traffic (Hinge, milestone 4) or
-> prove releases live (Proof, milestone 5). See [Build order](#build-order).
+> **Status: milestone 4 of 10.** Henry builds, runs and routes your apps: every
+> push is built and run on trial, and live releases are routed through Caddy
+> and a Cloudflare Tunnel. What it cannot do yet is *make* a release live:
+> that is Proof, milestone 5. See [Build order](#build-order).
 
 ## The parts
 
@@ -28,7 +28,7 @@ something second about how.
 | **Plumb** | The reconcile loop that closes drift | done |
 | **Hold** | The Podman VM and the runtime interface | done |
 | **Press** | Fetch, build and release on every push | done |
-| **Hinge** | cloudflared and Caddy: routes that swing atomically | milestone 4 |
+| **Hinge** | cloudflared and Caddy: routes that swing atomically | done |
 | **Proof** | The Live gate: soak, probes, restart test, public probe | milestone 5 |
 | **Draft** | Onboarding, from repo URL to Live | milestone 6 |
 | **Sound** | The repo scan that uses no AI | milestone 6 |
@@ -101,6 +101,53 @@ henry secret set henry/GITHUB_WEBHOOK_SECRET   # then point GitHub at /hooks/git
 henry secret set henry/GITHUB_TOKEN            # for private repos; never on argv
 ```
 
+## How a request reaches an app
+
+```
+visitor → Cloudflare → tunnel → cloudflared → Caddy (127.0.0.1:8080) → container (127.0.0.1:20000+)
+```
+
+Hinge keeps both ends in line with Canon on every tick:
+
+- **Caddy** gets its whole route table through its admin API, only when it
+  changed. Caddy runs under its own LaunchAgent with `--resume`, so routes
+  survive a restart of Caddy, of Henry or of the Mac. Unknown hosts get a 404.
+- **Only live releases are routed.** A release on trial has no public route.
+- **A route swings only when the new upstream answers.** Until then it stays on
+  the old release.
+- **The tunnel** sends every public hostname to Caddy, then a 404 catch-all.
+- **DNS**: Henry creates a proxied CNAME per hostname, tagged
+  `managed by henry`. It only ever edits or deletes records carrying that tag,
+  so a record you made by hand is reported, never overwritten.
+
+Henry is not on the request path. Stop it and traffic keeps flowing.
+
+### Setting up the tunnel
+
+1. In the Cloudflare dashboard, create a tunnel (Zero Trust → Networks →
+   Tunnels → cloudflared). Note its id and copy its token.
+2. Create an API token with *Cloudflare Tunnel: Edit* on the account and
+   *DNS: Edit* on your zone.
+3. Tell Henry:
+
+```toml
+# henry.toml
+[cloudflare]
+account = "<account id>"
+tunnel = "<tunnel id>"
+zones = ["example.com"]
+
+[hinge]
+hooks_host = "hooks.example.com"   # GitHub's webhook: https://hooks.example.com/hooks/github
+```
+
+```sh
+henry secret set henry/CLOUDFLARE_API_TOKEN
+henry secret set henry/CLOUDFLARE_TUNNEL_TOKEN   # cloudflared reads it from a 0600 file
+henry install                                    # Henry, Caddy and cloudflared agents
+henry routes                                     # what is routed where
+```
+
 ## Using it
 
 ```sh
@@ -113,6 +160,8 @@ cargo build --release
 ./target/release/henry ps                        # what the engine runs, per app
 ./target/release/henry apps                      # every app and its state
 ./target/release/henry show draw                 # routes, secrets, releases, events
+./target/release/henry routes                    # public hostnames and where they go
+./target/release/henry reload                    # reread henry.toml and Henry's secrets
 ./target/release/henry install                   # run at login under launchd
 ```
 
@@ -124,8 +173,8 @@ the paths; `HENRY_HOME` overrides them.
 
 1. **Foundations** — Canon, Lease, Hush, CLI, daemon skeleton, launchd.
 2. **Hold and Plumb** — Podman runtime and the reconcile loop.
-3. **Press** — fetch, build and release on push. *(this)*
-4. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS.
+3. **Press** — fetch, build and release on push.
+4. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS. *(this)*
 5. **Proof** — the Live gate.
 6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
 7. **Ark** — backups and restore drills.
@@ -142,9 +191,10 @@ cargo fmt --all
 ```
 
 CI runs all three on Linux and macOS. Tests that need a real container engine
-run when `HENRY_ENGINE_TESTS=1` and a Docker or Podman socket is present; CI
-runs them on Linux.
+run when `HENRY_ENGINE_TESTS=1` and a Docker or Podman socket is present, and
+Hinge's Caddy test runs when `HENRY_CADDY` names a `caddy` binary. CI runs
+both on Linux.
 
 ```sh
-HENRY_ENGINE_TESTS=1 cargo test --workspace
+HENRY_ENGINE_TESTS=1 HENRY_CADDY=$(which caddy) cargo test --workspace
 ```
