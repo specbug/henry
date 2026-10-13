@@ -1,0 +1,25 @@
+[package]
+name = "mend"
+description = "Upkeep: the small repairs that keep a house standing, each undone if it makes things worse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bzip2.workspace = true
+canon.workspace = true
+flate2.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+lease.workspace = true
+tempfile.workspace = true

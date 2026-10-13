@@ -114,6 +114,21 @@ fn recipe_hash(build: &Build, overlays: &[(String, String)]) -> String {
     hex::encode(&h.finalize()[..3])
 }
 
+/// What a refresh found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Refresh {
+    /// Nothing is live, so there is nothing to refresh.
+    NothingLive,
+    /// A release is already on trial; refreshing waits for it.
+    Busy,
+    /// The rebuilt images are the ones running.
+    Unchanged,
+    /// A new release is on trial, with these services' images changed.
+    Released(i64, Vec<String>),
+    /// The live commit no longer builds, e.g. its base image moved on.
+    Failed(String),
+}
+
 /// Queue a deploy for `app`. Without `commit`, Press releases whatever the
 /// branch points at when the job runs, so a burst of pushes builds once.
 pub fn request(canon: &Canon, app: &str, commit: Option<&str>, force: bool) -> Result<Job> {
@@ -211,6 +226,31 @@ impl<B: Builder> Press<B> {
         self.canon.set_release_state(release.id, ReleaseState::Building, None)?;
         info!(app = name, release = release.id, commit = short, "building");
 
+        let images = match self.build_all(name, &release.id.to_string(), &commit, &lease, &dir, None).await? {
+            Ok(images) => images,
+            Err(why) => return self.fail(&release, why),
+        };
+
+        self.canon.set_release_images(release.id, &serde_json::Value::Object(images))?;
+        self.canon.supersede_trials(name, release.id)?;
+        self.canon.set_release_state(release.id, ReleaseState::Trial, Some(&format!("built from {short}")))?;
+        info!(app = name, release = release.id, "on trial");
+        Ok(Outcome::Released(release.id))
+    }
+
+    /// Build every service that needs a build. The outer error is worth
+    /// retrying; the inner one is why this commit does not build. `fresh`
+    /// pulls base images again and tags the result apart, for a refresh.
+    async fn build_all(
+        &self,
+        name: &str,
+        log_id: &str,
+        commit: &str,
+        lease: &Lease,
+        dir: &std::path::Path,
+        fresh: Option<&str>,
+    ) -> Result<Result<serde_json::Map<String, serde_json::Value>, String>> {
+        let short = &commit[..commit.len().min(12)];
         let overlays = self.canon.overlays(name)?;
         let mut images = serde_json::Map::new();
         for service in &lease.services {
@@ -229,32 +269,83 @@ impl<B: Builder> Press<B> {
                     Recipe::Dockerfile { context: &context, dockerfile: &dockerfile }
                 }
             };
-            let tag = format!("henry/{name}-{}:{short}-{}", service.name, recipe_hash(&service.build, &overlays));
+            let mut tag = format!("henry/{name}-{}:{short}-{}", service.name, recipe_hash(&service.build, &overlays));
+            if let Some(stamp) = fresh {
+                tag.push_str(&format!("-{stamp}"));
+            }
             if !self.builder.has(&tag).await? {
-                let log = self.settings.logs.join(format!("{name}-r{}-{}.log", release.id, service.name));
+                let log = self.settings.logs.join(format!("{name}-r{log_id}-{}.log", service.name));
                 let labels = vec![
                     ("dev.henry.managed".to_owned(), "1".to_owned()),
                     ("dev.henry.app".to_owned(), name.to_owned()),
-                    ("dev.henry.commit".to_owned(), commit.clone()),
+                    ("dev.henry.commit".to_owned(), commit.to_owned()),
                 ];
-                let req = BuildRequest { recipe, tag: &tag, log: &log, labels: &labels };
+                let req = BuildRequest { recipe, tag: &tag, pull: fresh.is_some(), log: &log, labels: &labels };
                 if let Err(e) = self.build_with_retry(&req).await {
                     if e.is_transient() {
                         return Err(e);
                     }
                     let last = tail(&log, 15);
-                    let why = format!("`{}` did not build: {e}. Log: {}\n{last}", service.name, log.display());
-                    return self.fail(&release, why);
+                    return Ok(Err(format!("`{}` did not build: {e}. Log: {}\n{last}", service.name, log.display())));
                 }
             }
             images.insert(service.name.clone(), tag.into());
         }
+        Ok(Ok(images))
+    }
 
-        self.canon.set_release_images(release.id, &serde_json::Value::Object(images))?;
-        self.canon.supersede_trials(name, release.id)?;
-        self.canon.set_release_state(release.id, ReleaseState::Trial, Some(&format!("built from {short}")))?;
-        info!(app = name, release = release.id, "on trial");
-        Ok(Outcome::Released(release.id))
+    /// Rebuild the live release's commit with base images pulled again. If
+    /// any image changed, the result goes on trial like any push: security
+    /// patches arrive without one, and still pass the gate. If none changed,
+    /// the new tags are dropped and nothing happens.
+    pub async fn refresh(&self, name: &str) -> Result<Refresh> {
+        let app = self.canon.app(name)?;
+        let Some(live) = app.live_release else { return Ok(Refresh::NothingLive) };
+        if self.canon.wanted_releases(name)?.candidate.is_some() {
+            return Ok(Refresh::Busy);
+        }
+        let release = self.canon.release(live)?;
+        let lease = Lease::parse(&release.lease).map_err(|e| Error::Build(format!("the live lease: {e}")))?;
+        if lease.services.iter().all(|s| matches!(s.build, Build::Image(_))) {
+            return Ok(Refresh::Unchanged);
+        }
+        let dir = self.settings.checkouts.join(name);
+        self.git.checkout(&dir, &app.repo, &lease.branch, &release.commit_sha).await?;
+        self.overlay(name, &dir)?;
+        let stamp = format!("f{}", canon::now_ms());
+        let fresh = match self.build_all(name, "refresh", &release.commit_sha, &lease, &dir, Some(&stamp)).await? {
+            Ok(images) => images,
+            Err(why) => return Ok(Refresh::Failed(why)),
+        };
+        let mut images = serde_json::Map::new();
+        let mut changed = Vec::new();
+        for (service, image) in fresh {
+            let new = image.as_str().unwrap_or_default().to_owned();
+            let old = release.images.get(&service).and_then(|i| i.as_str()).unwrap_or_default().to_owned();
+            let differs = new != old && {
+                let (a, b) = (self.builder.image_id(&new).await?, self.builder.image_id(&old).await?);
+                a.is_none() || a != b
+            };
+            if differs {
+                changed.push(service.clone());
+                images.insert(service, new.into());
+            } else {
+                if new != old {
+                    let _ = self.builder.remove(&new).await;
+                }
+                images.insert(service, old.into());
+            }
+        }
+        if changed.is_empty() {
+            return Ok(Refresh::Unchanged);
+        }
+        let next = self.canon.create_release(name, &release.commit_sha, &release.lease)?;
+        self.canon.set_release_images(next.id, &serde_json::Value::Object(images))?;
+        self.canon.supersede_trials(name, next.id)?;
+        let why = format!("base images refreshed: {}", changed.join(", "));
+        self.canon.set_release_state(next.id, ReleaseState::Trial, Some(&why))?;
+        info!(app = name, release = next.id, "{why}");
+        Ok(Refresh::Released(next.id, changed))
     }
 
     /// Write Henry's own files (a Dockerfile Ghost wrote, say) into the

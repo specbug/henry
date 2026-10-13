@@ -29,6 +29,8 @@ pub enum Recipe<'a> {
 pub struct BuildRequest<'a> {
     pub recipe: Recipe<'a>,
     pub tag: &'a str,
+    /// Fetch base images again even if they are cached: Mend's refresh.
+    pub pull: bool,
     pub log: &'a Path,
     pub labels: &'a [(String, String)],
 }
@@ -37,6 +39,16 @@ pub trait Builder: Send + Sync {
     /// Whether an image with this tag already exists, so the build can be skipped.
     fn has(&self, tag: &str) -> impl Future<Output = Result<bool>> + Send;
     fn build(&self, req: &BuildRequest<'_>) -> impl Future<Output = Result<()>> + Send;
+
+    /// The image's content id, to tell whether a rebuild changed anything.
+    fn image_id(&self, _tag: &str) -> impl Future<Output = Result<Option<String>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Drop a tag nobody will run.
+    fn remove(&self, _tag: &str) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 }
 
 pub struct CliBuilder {
@@ -65,6 +77,14 @@ pub const BUILDKIT: &str = "henry-buildkit";
 const TEMPFAIL: i32 = 75;
 
 impl Builder for CliBuilder {
+    async fn image_id(&self, tag: &str) -> Result<Option<String>> {
+        CliBuilder::image_id(self, tag).await
+    }
+
+    async fn remove(&self, tag: &str) -> Result<()> {
+        self.engine(&["rmi", tag]).await.map(|_| ()).map_err(Error::Build)
+    }
+
     async fn has(&self, tag: &str) -> Result<bool> {
         let status = Command::new(&self.program)
             .args(["image", "inspect", tag])
@@ -90,6 +110,9 @@ impl Builder for CliBuilder {
             Recipe::Dockerfile { context, dockerfile } => {
                 let mut cmd = Command::new(&self.program);
                 cmd.arg("build").arg("-f").arg(dockerfile).arg("-t").arg(req.tag);
+                if req.pull {
+                    cmd.arg("--pull");
+                }
                 for (k, v) in req.labels {
                     cmd.arg("--label").arg(format!("{k}={v}"));
                 }
@@ -135,6 +158,10 @@ impl Builder for CliBuilder {
 }
 
 impl CliBuilder {
+    pub async fn image_id(&self, tag: &str) -> Result<Option<String>> {
+        Ok(self.engine(&["image", "inspect", "-f", "{{.Id}}", tag]).await.ok().map(|s| s.trim().to_owned()))
+    }
+
     /// Start `henry-buildkit` unless it is running.
     async fn ensure_buildkit(&self, rp: &Railpack) -> Result<()> {
         let running = self.engine(&["inspect", "-f", "{{.State.Running}}", BUILDKIT]).await;

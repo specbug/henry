@@ -28,6 +28,11 @@ health = { redis = true }
 #[derive(Default)]
 struct FakeBuilder {
     built: Mutex<Vec<String>>,
+    /// The base image's version: an image built on it gets an id from it.
+    base: Mutex<u32>,
+    ids: Mutex<std::collections::BTreeMap<String, String>>,
+    pulled: Mutex<Vec<bool>>,
+    removed: Mutex<Vec<String>>,
     recipes: Mutex<Vec<String>>,
     /// How many of the next builds fail.
     failures: Mutex<u32>,
@@ -46,6 +51,7 @@ impl Builder for FakeBuilder {
             Recipe::Railpack { dir } => assert!(dir.is_dir(), "Railpack gets the source: {}", dir.display()),
         }
         self.recipes.lock().unwrap().push(format!("{:?}", req.recipe));
+        self.pulled.lock().unwrap().push(req.pull);
         std::fs::create_dir_all(req.log.parent().unwrap()).unwrap();
         let mut failures = self.failures.lock().unwrap();
         if *failures > 0 {
@@ -54,6 +60,17 @@ impl Builder for FakeBuilder {
             return Err(Error::Build("the build exited with exit status: 2".into()));
         }
         self.built.lock().unwrap().push(req.tag.to_owned());
+        let id = format!("sha256:base{}", self.base.lock().unwrap());
+        self.ids.lock().unwrap().insert(req.tag.to_owned(), id);
+        Ok(())
+    }
+
+    async fn image_id(&self, tag: &str) -> Result<Option<String>> {
+        Ok(self.ids.lock().unwrap().get(tag).cloned())
+    }
+
+    async fn remove(&self, tag: &str) -> Result<()> {
+        self.removed.lock().unwrap().push(tag.to_owned());
         Ok(())
     }
 }
@@ -74,6 +91,12 @@ impl Builder for Arc<FakeBuilder> {
     }
     async fn build(&self, req: &BuildRequest<'_>) -> Result<()> {
         (**self).build(req).await
+    }
+    async fn image_id(&self, tag: &str) -> Result<Option<String>> {
+        (**self).image_id(tag).await
+    }
+    async fn remove(&self, tag: &str) -> Result<()> {
+        (**self).remove(tag).await
     }
 }
 
@@ -336,4 +359,31 @@ async fn a_missing_branch_is_an_error_not_a_release() {
     assert!(w.canon.releases("draw", 5).unwrap().is_empty());
     assert_eq!(w.canon.job(job.id).unwrap().state, JobState::Running);
     let _ = &w.origin;
+}
+
+#[tokio::test]
+async fn a_refresh_releases_only_when_a_base_image_moved() {
+    let w = world();
+    assert_eq!(w.press.refresh("draw").await.unwrap(), Refresh::NothingLive);
+    w.push(&[("Dockerfile", "FROM scratch\n")]);
+    let Outcome::Released(first) = w.deploy().await else { panic!() };
+    w.canon.set_release_state(first, ReleaseState::Live, None).unwrap();
+
+    // Same base: rebuilt with a pull, found identical, and dropped.
+    assert_eq!(w.press.refresh("draw").await.unwrap(), Refresh::Unchanged);
+    assert_eq!(*w.builder.pulled.lock().unwrap(), [false, true], "a refresh pulls; a push does not");
+    assert_eq!(w.builder.removed.lock().unwrap().len(), 1);
+
+    // A patched base: a new release of the same commit goes on trial.
+    *w.builder.base.lock().unwrap() += 1;
+    let Refresh::Released(next, changed) = w.press.refresh("draw").await.unwrap() else { panic!() };
+    assert_eq!(changed, ["web"]);
+    let r = w.canon.release(next).unwrap();
+    assert_eq!(r.state, ReleaseState::Trial);
+    assert_eq!(r.commit_sha, w.canon.release(first).unwrap().commit_sha);
+    assert_eq!(r.images["cache"], "redis:7-alpine", "a published image is left as it is");
+    assert_ne!(r.images["web"], w.canon.release(first).unwrap().images["web"]);
+    assert!(r.reason.unwrap().contains("base images refreshed: web"));
+
+    assert_eq!(w.press.refresh("draw").await.unwrap(), Refresh::Busy, "one trial at a time");
 }
