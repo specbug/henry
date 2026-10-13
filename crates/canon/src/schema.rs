@@ -153,6 +153,35 @@ const MIGRATIONS: &[&str] = &[
         at       INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX drills_by_target ON drills (app, target, id DESC);",
+    // 6: Mend's upkeep. One row per task: when it last ran and how it went.
+    // `tools` is each managed binary's version, with the one it replaced kept
+    // for rollback and `pending` set while a switch is being proven. `bench`
+    // is every model eval run.
+    "CREATE TABLE upkeep (
+        task    TEXT PRIMARY KEY,
+        last_at INTEGER NOT NULL,
+        ok      INTEGER NOT NULL,
+        detail  TEXT
+    ) STRICT;
+
+    CREATE TABLE tools (
+        name       TEXT PRIMARY KEY,
+        current    TEXT NOT NULL,
+        previous   TEXT,
+        pending    TEXT,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE bench (
+        id     INTEGER PRIMARY KEY,
+        model  TEXT NOT NULL,
+        passed INTEGER NOT NULL,
+        total  INTEGER NOT NULL,
+        tokens INTEGER NOT NULL,
+        detail TEXT NOT NULL,
+        at     INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX bench_by_model ON bench (model, id DESC);",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

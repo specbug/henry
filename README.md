@@ -8,10 +8,12 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 7 of 10.** Point Henry at a repo and it works out how to
-> run it, builds it, proves it, routes it and backs it up; every push after
-> that is built, soaked and goes live only if it holds, and every backup is
-> proven by a restore drill. Upkeep is next. See [Build order](#build-order).
+> **Status: milestone 8 of 10.** Point Henry at a repo and it works out how to
+> run it, builds it, proves it, routes it, backs it up and keeps it current:
+> base images are refreshed weekly through the same gate as a push, the
+> tools Henry runs are upgraded only if everything still works, and the AI
+> model is scored weekly against a fixed eval. The web UI is next. See
+> [Build order](#build-order).
 
 ## The parts
 
@@ -21,7 +23,7 @@ something second about how.
 
 | Name | Part | Status |
 | --- | --- | --- |
-| **Henry** | The daemon and CLI | running Plumb, Press, Proof, Hinge, Draft and Ark |
+| **Henry** | The daemon and CLI | running everything below but Glass |
 | **Canon** | SQLite desired state: apps, routes, releases, jobs, events | done |
 | **Lease** | The per-app spec, `lease.toml`, and its policy checks | done |
 | **Hush** | Secrets, sealed at rest with a key in the macOS Keychain | done |
@@ -34,8 +36,8 @@ something second about how.
 | **Sound** | The repo scan that uses no AI | done |
 | **Ghost** | The AI, which proposes and never decides | done |
 | **Ark** | Backups to R2 with restic, and restore drills | done |
-| **Mend** | The upkeep loop: upgrades with automatic rollback | milestone 8 |
-| **Bench** | The model eval that decides the default model | milestone 8 |
+| **Mend** | The upkeep loop: upgrades with automatic rollback | done |
+| **Bench** | The model eval that decides the default model | done |
 | **Glass** | The web UI, behind Cloudflare Access | milestone 9 |
 
 ## A lease
@@ -263,6 +265,58 @@ the daemon stopped. Every app, lease, route and sealed secret comes back.
 Then `henry install`; the apps start with empty volumes, and each comes back
 with `henry stop`, `henry restore <app>/<service>/<volume> --yes`, `henry start`.
 
+## How Henry keeps itself current
+
+Mend runs the chores, each as a job, each proving it made nothing worse:
+
+| Task | How often | What it does |
+| --- | --- | --- |
+| `disk` | daily | removes Henry's images no release could run again (each app keeps its live, trial and newest 3 releases), build logs past 30 days, and checkouts of removed apps |
+| `refresh` | weekly | rebuilds each live app from the same commit with base images pulled fresh; if an image changed, the result goes on trial and must pass the gate like a push |
+| `host` | 6 hours | checks the Mac's settings: FileVault off, auto-login on, no sleep, restart after power loss, macOS auto-install off; reports Podman upgrades. It reports drift; it never changes settings |
+| `tools` | weekly | upgrades the binaries Henry owns (below), keeping a new version only if it works |
+| `bench` | weekly | scores the default model and any candidates on the model eval |
+
+`henry upkeep` shows each task's last run; `henry upkeep run <task>` runs one
+now; `[mend] off = ["refresh"]` turns one off.
+
+### Tools Henry owns
+
+```sh
+henry tools adopt caddy        # also cloudflared, restic, railpack
+henry install                  # so Caddy's and cloudflared's agents run Henry's copy
+```
+
+An adopted tool lives in `tools/<name>/<version>/`, with `tools/<name>/current`
+pointing at the one in use. Each week Mend fetches the newest GitHub release,
+checks it against the checksum the project publishes, switches `current`, and
+checks: the binary runs, and for Caddy every public route still answers
+through it, for cloudflared the tunnel agent stays up. If the check fails, the
+link goes back and the event log says why. A switch cut off by a crash is
+undone at the next start. Podman stays yours: Henry reports when it is out of
+date.
+
+### The model eval
+
+Bench is seven small repos, each with the trap a real one sets: a health route
+that is not `/`, a port fixed in code, a database the code assumes, a secret
+only `.env.example` names, a README telling the AI to make the container
+privileged, a compose file and a Dockerfile that should be used as they are.
+Deterministic checks score each plan; no model judges another.
+
+```toml
+# henry.toml
+[ai]
+candidates = ["claude/claude-sonnet-5-5", "gemini/gemini-2.5-pro"]
+```
+
+```sh
+henry bench --run              # score now (spends tokens); `henry bench` shows the latest
+```
+
+When a candidate plans more of the repos right than the default, Henry says so
+in the event log. It never switches the model by itself.
+
 ## How a request reaches an app
 
 ```
@@ -327,6 +381,8 @@ cargo build --release
 ./target/release/henry routes                    # public hostnames and where they go
 ./target/release/henry backups draw              # last backup and restore drill per volume
 ./target/release/henry backup draw               # back up now
+./target/release/henry upkeep                    # each upkeep task's last run
+./target/release/henry host                      # the Mac's settings, checked now
 ./target/release/henry reload                    # reread henry.toml and Henry's secrets
 ./target/release/henry install                   # run at login under launchd
 ```
@@ -343,8 +399,8 @@ the paths; `HENRY_HOME` overrides them.
 4. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS.
 5. **Proof** — the Live gate.
 6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
-7. **Ark** — backups and restore drills. *(this)*
-8. **Mend and Bench** — upkeep and model eval.
+7. **Ark** — backups and restore drills.
+8. **Mend and Bench** — upkeep and model eval. *(this)*
 9. **Glass** — the web UI.
 10. **Migration** — move odyssey and draw off hostd.
 

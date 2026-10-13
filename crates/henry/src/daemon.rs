@@ -8,8 +8,8 @@
 //!   start. Proof judges what Plumb runs, and Hinge routes what Proof promoted
 //!   in the same tick.
 //! - The job worker, one job at a time (builds are heavy): Press's deploys,
-//!   Draft's onboardings and Ark's backups. Draft's pass runs on the tick,
-//!   after Proof, and so does Ark's schedule.
+//!   Draft's onboardings, Ark's backups and Mend's upkeep. Draft's pass runs
+//!   on the tick, after Proof, and so do Ark's and Mend's schedules.
 //! - Press's poll of every auto-deploying branch.
 //! - The loopback HTTP endpoint, for GitHub's push webhook.
 //!
@@ -149,6 +149,11 @@ pub fn run(home: &Home) -> Result<()> {
                             Err(e) => warn!("cannot read backup secrets: {e}"),
                         }
                     }
+                    match mend::schedule(&canon, &config.mend.tasks()) {
+                        Ok(q) if !q.is_empty() => info!(?q, "upkeep queued"),
+                        Ok(_) => {}
+                        Err(e) => warn!("cannot schedule upkeep: {e}"),
+                    }
                     match hinge.pass().await {
                         Ok(_) => last_hinge_error = None,
                         Err(e) => {
@@ -183,7 +188,7 @@ async fn http(listen: String, canon: Arc<Canon>, hush: Arc<Hush>) {
 
 /// Build a Press for one use, so a GitHub token set with `henry secret set`
 /// applies without a restart.
-fn press(home: &Home, config: &Config, hush: &Hush, canon: Arc<Canon>) -> Result<Press<CliBuilder>> {
+pub(crate) fn press(home: &Home, config: &Config, hush: &Hush, canon: Arc<Canon>) -> Result<Press<CliBuilder>> {
     let program = builder_program(config);
     let builder = CliBuilder {
         railpack: railpack(home, config, &program),
@@ -230,7 +235,7 @@ fn draft(
 fn railpack(home: &Home, config: &Config, engine: &std::path::Path) -> Option<Railpack> {
     let program = match &config.press.railpack {
         Some(p) => p.clone(),
-        None => which("railpack").or_else(|| {
+        None => mend::tools::Tools::current(&home.tools(), "railpack").or_else(|| which("railpack")).or_else(|| {
             let brew = std::path::PathBuf::from("/opt/homebrew/bin/railpack");
             brew.is_file().then_some(brew)
         })?,
@@ -282,6 +287,12 @@ pub(crate) fn builder_program(config: &Config) -> std::path::PathBuf {
 
 /// Run queued jobs, one at a time.
 async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
+    // A tool switch cut off mid-check goes back to the version it replaced.
+    if let Ok(tools) = mend::tools::Tools::new(home.tools(), &config.mend.github_api, None)
+        && let Err(e) = tools.recover(&canon)
+    {
+        warn!("cannot recover tool versions: {e}");
+    }
     // A backup cut off mid-copy may have left containers paused.
     if config.ark.is_some() {
         ark::unpause_all(&crate::backup::engine(&config)).await;
@@ -303,6 +314,12 @@ async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
             press::JOB => match press(&home, &config, &hush, canon.clone()) {
                 Ok(p) => p.run(&job).await.map(|o| o.to_string()).map_err(|e| (e.is_transient(), e.to_string())),
                 Err(e) => Err((false, format!("{e:#}"))),
+            },
+            mend::JOB => match job.app.as_deref().and_then(mend::Task::parse) {
+                Some(task) => crate::upkeep::run(&home, &config, canon.clone(), hush.clone(), task)
+                    .await
+                    .map_err(|e| (false, format!("{e:#}"))),
+                None => Err((false, format!("no upkeep task `{}`", job.app.as_deref().unwrap_or_default()))),
             },
             ark::JOB => match crate::backup::ark(&home, &config, canon.clone(), &hush) {
                 Ok(a) => a.run(&job).await.map_err(|e| (e.is_transient(), e.to_string())),

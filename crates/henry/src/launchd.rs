@@ -87,7 +87,7 @@ pub fn caddy(home: &Home, config: &Config) -> Agent {
     Agent {
         label: CADDY,
         args: vec![
-            config.hinge.caddy.display().to_string(),
+            home.tool("caddy", &config.hinge.caddy).display().to_string(),
             "run".into(),
             "--resume".into(),
             "--config".into(),

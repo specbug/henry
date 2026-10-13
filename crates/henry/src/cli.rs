@@ -122,6 +122,26 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Upkeep: each task's last run, or `henry upkeep run <task>` to run one
+    /// now (disk, refresh, host, tools, bench).
+    Upkeep {
+        #[command(subcommand)]
+        cmd: Option<UpkeepCmd>,
+    },
+    /// Check the Mac's settings an unattended host depends on, now.
+    Host,
+    /// The binaries Henry owns and upgrades, or adopt one:
+    /// `henry tools adopt caddy` (or cloudflared, restic, railpack).
+    Tools {
+        #[command(subcommand)]
+        cmd: Option<ToolsCmd>,
+    },
+    /// The model eval's latest scores, or `--run` to score now. Scoring
+    /// spends model tokens.
+    Bench {
+        #[arg(long)]
+        run: bool,
+    },
     /// Export or import the master key that seals every secret. Keep a copy
     /// with your restic password: restoring Henry on a new Mac needs both.
     #[command(subcommand)]
@@ -141,6 +161,19 @@ enum Cmd {
     Reload,
     /// Show where Henry keeps its files.
     Where,
+}
+
+#[derive(Subcommand)]
+enum UpkeepCmd {
+    /// Queue a task now.
+    Run { task: String },
+}
+
+#[derive(Subcommand)]
+enum ToolsCmd {
+    /// Install a tool's newest release and run it from now on. Run
+    /// `henry install` afterwards so Caddy's and cloudflared's agents use it.
+    Adopt { name: String },
 }
 
 #[derive(Subcommand)]
@@ -211,12 +244,30 @@ pub fn run(args: Args) -> Result<ExitCode> {
         Cmd::Backups { app } => backups(&home, &app)?,
         Cmd::Restore { target, snapshot, yes } => restore(&home, &target, snapshot.as_deref(), yes)?,
         Cmd::Key(cmd) => key(&home, cmd)?,
+        Cmd::Upkeep { cmd } => upkeep(&home, cmd)?,
+        Cmd::Host => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let checks = rt.block_on(mend::host::checks());
+            if checks.is_empty() {
+                println!("not a Mac: nothing to check");
+            }
+            for c in checks {
+                let mark = match c.ok {
+                    Some(true) => "ok   ",
+                    Some(false) => "DRIFT",
+                    None => "?    ",
+                };
+                println!("{mark}  {:<26} want {:<28} found {}", c.name, c.want, c.got);
+            }
+        }
+        Cmd::Tools { cmd } => tools(&home, cmd)?,
+        Cmd::Bench { run } => bench(&home, run)?,
         Cmd::Install { print } => {
             let binary = std::env::current_exe()?.canonicalize()?;
             let config = Config::load(&home.config())?;
             let mut agents = vec![launchd::caddy(&home, &config), launchd::henry(&binary, &home)];
             if let Some(cf) = &config.cloudflare {
-                agents.insert(1, launchd::cloudflared(&home, &cf.cloudflared));
+                agents.insert(1, launchd::cloudflared(&home, &home.tool("cloudflared", &cf.cloudflared)));
             }
             if print {
                 for a in &agents {
@@ -595,6 +646,81 @@ fn restore(home: &Home, target: &str, snapshot: Option<&str>, yes: bool) -> Resu
         anyhow::Ok(())
     })?;
     println!("start it again with `henry start {app}`");
+    Ok(())
+}
+
+fn upkeep(home: &Home, cmd: Option<UpkeepCmd>) -> Result<()> {
+    let canon = canon(home)?;
+    if let Some(UpkeepCmd::Run { task }) = cmd {
+        let t = mend::Task::parse(&task)
+            .with_context(|| format!("no task `{task}`: disk, refresh, host, tools or bench"))?;
+        let job = canon.enqueue(mend::JOB, Some(t.as_str()), &serde_json::json!({}))?;
+        println!("{task} queued (job {}); the daemon runs it", job.id);
+        return Ok(());
+    }
+    let config = Config::load(&home.config())?;
+    let on = config.mend.tasks();
+    for t in mend::Task::ALL {
+        let state = if on.contains(&t) { "" } else { " (off)" };
+        match canon.upkeep(t.as_str())? {
+            None => println!("{:<8}{state} never run", t.as_str()),
+            Some(u) => println!(
+                "{:<8}{state} {} {} — {}",
+                t.as_str(),
+                if u.ok { "ok    " } else { "FAILED" },
+                utc(u.last_at),
+                u.detail.unwrap_or_default()
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn tools(home: &Home, cmd: Option<ToolsCmd>) -> Result<()> {
+    let canon = Arc::new(canon(home)?);
+    match cmd {
+        Some(ToolsCmd::Adopt { name }) => {
+            let config = Config::load(&home.config())?;
+            let hush = open_hush(home, canon.clone())?;
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let v = rt.block_on(crate::upkeep::adopt(home, &config, &canon, &hush, &name))?;
+            println!("{name} {v} installed in {}", home.tools().join(&name).display());
+            println!("Henry upgrades it weekly from now on; run `henry install` so agents use it");
+        }
+        None => {
+            let managed = canon.tools()?;
+            if managed.is_empty() {
+                println!("Henry manages no tools yet; `henry tools adopt caddy` (or cloudflared, restic, railpack)");
+            }
+            for t in managed {
+                let prev = t.previous.map(|p| format!(", rolls back to {p}")).unwrap_or_default();
+                println!("{:<12} {}{prev} — since {}", t.name, t.current, utc(t.updated_at));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bench(home: &Home, run: bool) -> Result<()> {
+    let canon = Arc::new(canon(home)?);
+    if run {
+        let config = Config::load(&home.config())?;
+        let hush = open_hush(home, canon.clone())?;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let (summary, reports) = rt.block_on(crate::upkeep::bench(&config, &canon, &hush))?;
+        for r in &reports {
+            print!("{}", r.summary());
+        }
+        println!("{summary}");
+        return Ok(());
+    }
+    let runs = canon.bench_latest()?;
+    if runs.is_empty() {
+        println!("no Bench runs yet; `henry bench --run` scores the configured models");
+    }
+    for r in runs {
+        println!("{:<44} {}/{}  {} tokens  {}", r.model, r.passed, r.total, r.tokens, utc(r.at));
+    }
     Ok(())
 }
 

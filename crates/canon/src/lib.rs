@@ -10,6 +10,7 @@
 
 mod ark;
 mod draft;
+mod mend;
 mod schema;
 
 use std::path::Path;
@@ -21,6 +22,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 pub use ark::{Backup, Drill};
 pub use draft::{Draft, NewProposal, Proposal};
+pub use mend::{BenchRun, Tool, Upkeep};
 pub use rusqlite;
 pub use schema::LATEST as SCHEMA_VERSION;
 pub use serde_json;

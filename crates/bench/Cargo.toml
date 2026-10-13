@@ -1,0 +1,18 @@
+[package]
+name = "bench"
+description = "The model eval: a fixed set of repos every model must plan, scored without AI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ghost.workspace = true
+lease.workspace = true
+serde_json.workspace = true
+sound.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
