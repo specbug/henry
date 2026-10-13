@@ -350,8 +350,38 @@ impl Canon {
             Some(d) => format!("{status}: {d}"),
             None => status.to_string(),
         };
-        record(&conn, Some(name), "app.status", &message, &serde_json::Value::Null)?;
+        record(&conn, Some(name), "app.status", &message, &serde_json::json!({ "status": status.as_str() }))?;
         Ok(true)
+    }
+
+    /// Every status an app has had since `since`, oldest first, led by the
+    /// one it already had then (if any was recorded).
+    pub fn status_history(&self, app: &str, since: i64) -> Result<Vec<(i64, Status)>> {
+        let conn = self.conn()?;
+        let row = |r: &Row| -> rusqlite::Result<(i64, String, String)> { Ok((r.get(0)?, r.get(1)?, r.get(2)?)) };
+        let before = conn
+            .query_row(
+                "SELECT at, message, data FROM events WHERE app = ?1 AND kind = 'app.status' AND at < ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![app, since],
+                row,
+            )
+            .optional()?;
+        let mut stmt = conn.prepare(
+            "SELECT at, message, data FROM events WHERE app = ?1 AND kind = 'app.status' AND at >= ?2 ORDER BY id",
+        )?;
+        let after = stmt.query_map(params![app, since], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(before
+            .into_iter()
+            .chain(after)
+            .filter_map(|(at, message, data)| {
+                // Older events carry the status only in their message.
+                let data = json(data);
+                let text = data["status"].as_str().map(str::to_owned);
+                let text = text.unwrap_or_else(|| message.split(':').next().unwrap_or_default().to_owned());
+                Status::parse(&text).map(|s| (at, s))
+            })
+            .collect())
     }
 
     /// Forget an app, its routes, releases and secrets. Jobs and events stay
@@ -697,16 +727,18 @@ impl Canon {
             "SELECT id, at, app, kind, message, data FROM events
              WHERE ?1 IS NULL OR app = ?1 ORDER BY id DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![app, limit as i64], |r| {
-            Ok(Event {
-                id: r.get(0)?,
-                at: r.get(1)?,
-                app: r.get(2)?,
-                kind: r.get(3)?,
-                message: r.get(4)?,
-                data: json(r.get::<_, String>(5)?),
-            })
-        })?;
+        let rows = stmt.query_map(params![app, limit as i64], event_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Events newer than `after`, oldest first: what a watcher has not seen.
+    pub fn events_after(&self, after: i64, app: Option<&str>, limit: usize) -> Result<Vec<Event>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, app, kind, message, data FROM events
+             WHERE id > ?1 AND (?2 IS NULL OR app = ?2) ORDER BY id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![after, app, limit as i64], event_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -784,6 +816,17 @@ fn record(conn: &Connection, app: Option<&str>, kind: &str, message: &str, data:
         params![now_ms(), app, kind, message, data.to_string()],
     )?;
     Ok(())
+}
+
+fn event_row(r: &Row) -> rusqlite::Result<Event> {
+    Ok(Event {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        app: r.get(2)?,
+        kind: r.get(3)?,
+        message: r.get(4)?,
+        data: json(r.get::<_, String>(5)?),
+    })
 }
 
 fn get_app(conn: &Connection, name: &str) -> Result<App> {

@@ -8,12 +8,10 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 8 of 10.** Point Henry at a repo and it works out how to
-> run it, builds it, proves it, routes it, backs it up and keeps it current:
-> base images are refreshed weekly through the same gate as a push, the
-> tools Henry runs are upgraded only if everything still works, and the AI
-> model is scored weekly against a fixed eval. The web UI is next. See
-> [Build order](#build-order).
+> **Status: milestone 9 of 10.** Point Henry at a repo and it works out how to
+> run it, builds it, proves it, routes it, backs it up and keeps it current.
+> Glass, the web UI, shows all of it from anywhere, behind Cloudflare Access.
+> Moving the existing apps off hostd is next. See [Build order](#build-order).
 
 ## The parts
 
@@ -23,7 +21,7 @@ something second about how.
 
 | Name | Part | Status |
 | --- | --- | --- |
-| **Henry** | The daemon and CLI | running everything below but Glass |
+| **Henry** | The daemon and CLI | running everything below |
 | **Canon** | SQLite desired state: apps, routes, releases, jobs, events | done |
 | **Lease** | The per-app spec, `lease.toml`, and its policy checks | done |
 | **Hush** | Secrets, sealed at rest with a key in the macOS Keychain | done |
@@ -38,7 +36,7 @@ something second about how.
 | **Ark** | Backups to R2 with restic, and restore drills | done |
 | **Mend** | The upkeep loop: upgrades with automatic rollback | done |
 | **Bench** | The model eval that decides the default model | done |
-| **Glass** | The web UI, behind Cloudflare Access | milestone 9 |
+| **Glass** | The web UI, behind Cloudflare Access | done |
 
 ## A lease
 
@@ -364,6 +362,56 @@ henry install                                    # Henry, Caddy and cloudflared 
 henry routes                                     # what is routed where
 ```
 
+## Glass, the web UI
+
+Glass is a page Henry serves itself, built into the binary: no Node, no build
+step, nothing to keep in step with the daemon. It shows every app with thirty
+days of health, one mark an hour, each the worst the app was that hour, so a
+five-minute outage at 3am is still visible a month later. An app's page has
+its releases, the trial in progress, its services, backups and drills, the
+plans onboarding weighed, its logs, and what happened, as it happens.
+
+From Glass you can deploy, stop, start, back up, onboard a repo, run an
+upkeep task, and set a secret an app is waiting on. That is all the CLI can do
+that is safe to do from a phone. A secret's value is sealed on arrival and
+never sent back. Glass can mark nothing live: each action is a request the
+daemon carries out under the same rules as the CLI's, and the event log says
+who asked.
+
+Who gets in:
+
+- **On the Mac**, `henry open` signs your browser in with a token from
+  `glass.token` (0600). Loopback alone is not trust: a container can reach the
+  host's loopback too. Delete the file and restart Henry to sign every browser
+  out.
+- **From anywhere else**, through the tunnel, behind Cloudflare Access. Caddy
+  marks every request on Henry's own routes as come from the edge, replacing
+  whatever the client sent, and Glass then requires a token Access signed for
+  its application: right team, right AUD tag, unexpired, checked against the
+  team's current keys. Without Access set up, Henry routes no hostname to
+  Glass at all.
+
+Changes must be JSON from Glass's own origin, so a form on another site
+cannot make one, and the page runs under a strict content security policy.
+
+### Setting up Glass from anywhere
+
+1. In Zero Trust → Access → Applications, add a self-hosted application for
+   the hostname, e.g. `henry.example.com`, with a policy naming you. Copy its
+   *Application Audience (AUD) tag*.
+2. Tell Henry, and reload:
+
+```toml
+# henry.toml
+[glass]
+hostname = "henry.example.com"
+access_team = "acme"          # acme.cloudflareaccess.com
+access_aud = "<AUD tag>"
+```
+
+Hinge adds the hostname to the tunnel and DNS like any other route. An app
+cannot claim it.
+
 ## Using it
 
 ```sh
@@ -385,6 +433,7 @@ cargo build --release
 ./target/release/henry host                      # the Mac's settings, checked now
 ./target/release/henry reload                    # reread henry.toml and Henry's secrets
 ./target/release/henry install                   # run at login under launchd
+./target/release/henry open                      # Glass, signed in, in this Mac's browser
 ```
 
 Henry keeps everything in `~/Library/Application Support/Henry`, outside
@@ -400,8 +449,8 @@ the paths; `HENRY_HOME` overrides them.
 5. **Proof** — the Live gate.
 6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
 7. **Ark** — backups and restore drills.
-8. **Mend and Bench** — upkeep and model eval. *(this)*
-9. **Glass** — the web UI.
+8. **Mend and Bench** — upkeep and model eval.
+9. **Glass** — the web UI. *(this)*
 10. **Migration** — move odyssey and draw off hostd.
 
 ## Development

@@ -11,7 +11,7 @@
 //!   Draft's onboardings, Ark's backups and Mend's upkeep. Draft's pass runs
 //!   on the tick, after Proof, and so do Ark's and Mend's schedules.
 //! - Press's poll of every auto-deploying branch.
-//! - The loopback HTTP endpoint, for GitHub's push webhook.
+//! - The loopback HTTP endpoint: GitHub's push webhook, and Glass.
 //!
 //! On shutdown the side tasks are dropped mid-flight. That is safe: a job cut
 //! off here is still marked running in Canon and is requeued at next start.
@@ -64,8 +64,8 @@ pub fn run(home: &Home) -> Result<()> {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
-        let side = [
-            tokio::spawn(http(config.http.listen.clone(), canon.clone(), hush.clone())),
+        let mut side = [
+            tokio::spawn(http(home.clone(), config.clone(), canon.clone(), hush.clone())),
             tokio::spawn(work(home.clone(), config.clone(), canon.clone(), hush.clone())),
             tokio::spawn(poll(home.clone(), config.clone(), canon.clone(), hush.clone())),
         ];
@@ -94,6 +94,9 @@ pub fn run(home: &Home) -> Result<()> {
                             Ok(h) => hinge = h,
                             Err(e) => warn!("keeping the old routing setup: {e:#}"),
                         }
+                        // Glass's settings: the endpoint comes back up with them.
+                        side[0].abort();
+                        side[0] = tokio::spawn(http(home.clone(), config.clone(), canon.clone(), hush.clone()));
                         info!(default_model = ?config.ai.default_model, "configuration reloaded");
                     }
                     Err(e) => warn!("configuration not reloaded, keeping the old one: {e:#}"),
@@ -179,10 +182,24 @@ pub fn run(home: &Home) -> Result<()> {
     Ok(())
 }
 
-async fn http(listen: String, canon: Arc<Canon>, hush: Arc<Hush>) {
-    if let Err(e) = crate::http::serve(&listen, canon, hush).await {
+async fn http(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
+    let served = async {
+        let glass = crate::http::glass(&home, &config, canon.clone(), hush.clone())?;
+        // A reload replaces this task; the old listener may take a moment to go.
+        let mut tries = 0;
+        loop {
+            match crate::http::serve(&config.http.listen, canon.clone(), hush.clone(), glass.clone()).await {
+                Err(e) if tries < 10 && format!("{e:#}").contains("in use") => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                other => return other,
+            }
+        }
+    };
+    if let Err(e) = served.await {
         // Webhooks are a speed-up, not a dependency: polling still deploys.
-        warn!("the http endpoint is down, deploys fall back to polling: {e:#}");
+        warn!("the http endpoint is down, so are Glass and webhooks; deploys fall back to polling: {e:#}");
     }
 }
 

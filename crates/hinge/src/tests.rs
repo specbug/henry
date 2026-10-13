@@ -156,6 +156,32 @@ async fn a_route_waits_for_its_new_upstream_to_answer() {
     drop(listener);
 }
 
+#[tokio::test]
+async fn an_app_cannot_take_a_hostname_henry_serves_itself() {
+    let canon = Arc::new(Canon::open_in_memory().unwrap());
+    let text = LEASE.replace("draw.example.com", "hooks.example.com");
+    canon.insert_app(&Lease::parse(&text).unwrap(), &text, "repo", Source::Operator).unwrap();
+    let r = canon.create_release("draw", "sha", &text).unwrap();
+    canon.set_release_state(r.id, ReleaseState::Live, None).unwrap();
+    canon.port_for("draw", "web", r.id, 40000..41000).unwrap();
+    canon.port_for("draw", "api", r.id, 40000..41000).unwrap();
+    let proxy = Arc::new(FakeProxy::default());
+    let hinge = Hinge::new(canon, proxy.clone(), None::<Arc<FakeTunnel>>, settings());
+    hinge.pass().await.unwrap();
+    let applied = proxy.applied.lock().unwrap()[0].clone();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].owner, "henry");
+}
+
+#[test]
+fn caddy_marks_requests_to_henrys_own_routes() {
+    let caddy = Caddy::new("http://127.0.0.1:2019", "127.0.0.1:8080");
+    let own = Route { host: "henry.example.com".into(), path: "/".into(), upstream: 7777, owner: HENRY.into() };
+    let c = caddy.config(&[own]);
+    let proxy = &c["apps"]["http"]["servers"]["henry"]["routes"][0]["handle"][0];
+    assert_eq!(proxy["headers"]["request"]["set"][caddy::EDGE_HEADER], json!(["edge"]));
+}
+
 // --- Caddy ---------------------------------------------------------------------
 
 #[test]
@@ -173,6 +199,7 @@ fn caddy_config_routes_longer_paths_first() {
     assert_eq!(r[0]["match"][0]["path"], json!(["/api", "/api/*"]));
     assert_eq!(r[0]["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:20001");
     assert!(r[1]["match"][0].get("path").is_none(), "`/` matches the whole host");
+    assert!(r[0]["handle"][0].get("headers").is_none(), "an app's requests are not marked");
     assert_eq!(r[2]["handle"][0]["status_code"], 404, "everything else is a 404");
     assert!(r[2].get("match").is_none());
     assert_eq!(c["admin"]["listen"], "127.0.0.1:2019");

@@ -404,3 +404,29 @@ fn upkeep_tools_and_bench_are_remembered() {
     let latest: Vec<(String, i64)> = db.bench_latest().unwrap().into_iter().map(|b| (b.model, b.passed)).collect();
     assert_eq!(latest, [("claude/b".to_owned(), 7), ("meta/a".to_owned(), 6)]);
 }
+
+#[test]
+fn status_history_starts_with_the_status_held_then() {
+    let db = db_with("draw", "draw.example.com");
+    db.set_status("draw", Status::Live, None).unwrap();
+    // An event written before statuses carried data reads from its message.
+    db.record(Some("draw"), "app.status", "degraded: slow", &serde_json::Value::Null).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let since = now_ms();
+    db.set_status("draw", Status::Down, Some("exited")).unwrap();
+    let history: Vec<Status> = db.status_history("draw", since).unwrap().into_iter().map(|(_, s)| s).collect();
+    assert_eq!(history, [Status::Degraded, Status::Down]);
+    assert_eq!(db.status_history("draw", 0).unwrap().len(), 3);
+    assert!(db.status_history("other", 0).unwrap().is_empty());
+}
+
+#[test]
+fn events_after_returns_only_what_is_new() {
+    let db = db_with("draw", "draw.example.com");
+    let seen = db.events(None, 1).unwrap()[0].id;
+    db.record(Some("draw"), "x", "one", &serde_json::Value::Null).unwrap();
+    db.record(None, "y", "two", &serde_json::Value::Null).unwrap();
+    let all: Vec<String> = db.events_after(seen, None, 10).unwrap().into_iter().map(|e| e.message).collect();
+    assert_eq!(all, ["one", "two"]);
+    assert_eq!(db.events_after(seen, Some("draw"), 10).unwrap().len(), 1);
+}
