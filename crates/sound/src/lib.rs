@@ -113,6 +113,15 @@ pub struct ComposeService {
     pub ports: Vec<u16>,
     /// Literal values; `None` where the file interpolates or leaves it blank.
     pub env: BTreeMap<String, Option<String>>,
+    /// Variables whose whole value is one interpolation, `K: ${S:-d}`: where
+    /// compose would take each from (`S`, from `.env`), and the default it
+    /// would fall back to. Defaults are committed text, never secrets.
+    pub interpolated: BTreeMap<String, (String, Option<String>)>,
+    /// Whether it loads an `env_file`, which hands it every variable there.
+    pub env_file: bool,
+    /// The path its healthcheck asks for over HTTP on its own port, if any:
+    /// `curl -f http://localhost:8000/health` gives `(8000, "/health")`.
+    pub health: Option<(u16, String)>,
     /// Named volumes: `(name, mount)`. Bind mounts are not kept.
     pub volumes: Vec<(String, String)>,
     pub bind_mounts: bool,
@@ -509,6 +518,38 @@ fn image_kind(image: &str) -> Option<Need> {
     }
 }
 
+/// `${S}`, `${S:-d}`, `${S-d}` or `$S` as a whole value: `(S, d)`.
+fn interpolation(v: &str) -> Option<(String, Option<String>)> {
+    let name_ok = |n: &str| {
+        let mut c = n.chars();
+        c.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && c.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if let Some(inner) = v.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        if inner.contains(['$', '{', '}']) {
+            return None;
+        }
+        let (name, default) = match inner.split_once(":-").or_else(|| inner.split_once('-')) {
+            Some((n, d)) => (n, Some(d.to_owned())),
+            None => (inner, None),
+        };
+        return name_ok(name).then(|| (name.to_owned(), default));
+    }
+    v.strip_prefix('$').filter(|n| name_ok(n)).map(|n| (n.to_owned(), None))
+}
+
+/// `http://localhost:8000/health` as `(8000, "/health")`. Only the
+/// container's own loopback counts: that is what the service answers itself.
+fn local_http(word: &str) -> Option<(u16, String)> {
+    let rest = word.trim_matches(['"', '\'']).strip_prefix("http://")?;
+    let (host, path) = rest.split_once('/').map_or((rest, ""), |(h, p)| (h, p));
+    let (name, port) = host.rsplit_once(':').map_or((host, "80"), |(n, p)| (n, p));
+    if !matches!(name, "localhost" | "127.0.0.1" | "0.0.0.0") {
+        return None;
+    }
+    Some((port.parse().ok()?, format!("/{path}")))
+}
+
 fn compose(rel: &str, text: &str) -> Option<Compose> {
     use serde_yaml_ng::Value;
     let doc: Value = serde_yaml_ng::from_str(text).ok()?;
@@ -560,17 +601,32 @@ fn compose(rel: &str, text: &str) -> Option<Compose> {
                         Value::Bool(b) => Some(b.to_string()),
                         _ => None,
                     };
+                    if let Some(i) = v.as_deref().and_then(interpolation) {
+                        s.interpolated.insert(k.to_owned(), i);
+                    }
                     s.env.insert(k.to_owned(), v.filter(|v| !v.contains('$')));
                 }
             }
             Some(Value::Sequence(items)) => {
                 for item in items.iter().filter_map(Value::as_str) {
                     let (k, v) = item.split_once('=').map_or((item, None), |(k, v)| (k, Some(v.to_owned())));
+                    if let Some(i) = v.as_deref().and_then(interpolation) {
+                        s.interpolated.insert(k.to_owned(), i);
+                    }
                     s.env.insert(k.to_owned(), v.filter(|v| !v.contains('$')));
                 }
             }
             _ => {}
         }
+        s.env_file = svc.get("env_file").is_some();
+        s.health = svc.get("healthcheck").and_then(|h| h.get("test")).and_then(|t| {
+            let words: Vec<String> = match t {
+                Value::Sequence(items) => items.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                Value::String(t) => t.split_whitespace().map(str::to_owned).collect(),
+                _ => vec![],
+            };
+            words.iter().find_map(|w| local_http(w))
+        });
         for v in svc.get("volumes").and_then(Value::as_sequence).into_iter().flatten() {
             let (source, target) = match v {
                 Value::String(t) => {

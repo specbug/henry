@@ -8,6 +8,7 @@
 //! power cut [`Canon::requeue_interrupted`] puts every half-done job back
 //! on the queue and the daemon simply carries on.
 
+mod adopt;
 mod ark;
 mod draft;
 mod mend;
@@ -20,6 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lease::Lease;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+pub use adopt::Adoption;
 pub use ark::{Backup, Drill};
 pub use draft::{Draft, NewProposal, Proposal};
 pub use mend::{BenchRun, Tool, Upkeep};

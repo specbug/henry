@@ -14,7 +14,7 @@ plain words.
 
 | Name | Crate / module | Part |
 | --- | --- | --- |
-| Henry | `crates/henry` | the binary: CLI, daemon, launchd |
+| Henry | `crates/henry` | the binary: CLI, daemon, launchd; `adopt.rs` moves apps off hostd |
 | Canon | `crates/canon` | SQLite desired state |
 | Lease | `crates/lease` | `lease.toml` types, parser, policy |
 | Hush | `crates/hush` | sealed secrets |
@@ -82,7 +82,14 @@ the engine tests real.
 - **Only live releases get public routes.** Hinge reads `live_release`; a
   trial is never routed.
 - **DNS: touch only what Henry made.** Records Henry creates carry the comment
-  `managed by henry`; anything else is reported, never edited or deleted.
+  `managed by henry`; anything else is reported, never edited or deleted. The
+  one exception is `henry cutover`, which you run: it takes over that app's
+  record, saving the old one in Canon (`adoptions`) for `--back`.
+- **Adopting copies, never moves.** `henry adopt` (`henry/src/adopt.rs`)
+  reads hostd's volume with its users paused and never writes it. Cutover
+  refuses while anything of hostd's runs on the volume, and copies the data
+  again only before the DNS switch has begun, so a re-run never overwrites
+  what the app wrote on Henry.
 - **Only Proof marks a release Live.** Nothing else calls
   `set_release_state(.., Live, ..)`; no CLI command, no AI output.
 - **Promotion never recreates the proven container.** Aliases are out of the
@@ -94,7 +101,9 @@ the engine tests real.
   running) is Plumb's word and outranks Degraded.
 - **Sound runs nothing from the repo** and keeps env var names, never secret
   values. Ghost sees only files Sound walked, minus what `sound::readable`
-  rejects (`.env`, keys, credentials).
+  rejects (`.env`, keys, credentials). With a compose file, compose decides
+  which service gets which variable; Draft fills `${VAR:-default}` secrets
+  as compose would (`draft::interpolate`).
 - **Plans are checked where they are made.** `sound::Plan::check` runs inside
   Ghost's loop and again in Draft. Files go only under `.henry/`: overlays,
   stored in Canon and written into each checkout by Press.

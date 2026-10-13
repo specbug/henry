@@ -245,7 +245,7 @@ impl<B: Builder, P: Planner> Draft<B, P> {
                         continue;
                     }
                 };
-                if let Err(e) = self.accept(app, &d.repo, &lease, &plan, from) {
+                if let Err(e) = self.accept(app, &d.repo, &lease, &plan, from, &survey) {
                     let why = e.to_string();
                     self.canon.set_proposal_verdict(id, &why)?;
                     return self.stuck(app, &why);
@@ -355,8 +355,17 @@ impl<B: Builder, P: Planner> Draft<B, P> {
         })?)
     }
 
-    /// Make the plan the app's: its lease, its files, its generated secrets.
-    fn accept(&self, app: &str, repo: &str, lease: &lease::Lease, plan: &Plan, from: Origin) -> Result<()> {
+    /// Make the plan the app's: its lease, its files, its generated secrets,
+    /// and what its compose file would have filled in.
+    fn accept(
+        &self,
+        app: &str,
+        repo: &str,
+        lease: &lease::Lease,
+        plan: &Plan,
+        from: Origin,
+        survey: &Survey,
+    ) -> Result<()> {
         match self.canon.app(app) {
             Ok(_) => {
                 self.canon.update_lease(lease, &plan.lease, from.source())?;
@@ -367,7 +376,17 @@ impl<B: Builder, P: Planner> Draft<B, P> {
             Err(e) => return Err(e.into()),
         }
         self.canon.set_overlays(app, &plan.files)?;
-        generate(&self.hush, app, &plan.generate)
+        generate(&self.hush, app, &plan.generate)?;
+        let filled = interpolate(&self.hush, app, lease, survey)?;
+        if !filled.is_empty() {
+            self.canon.record(
+                Some(app),
+                "draft.secrets",
+                &format!("filled as compose would: {}", filled.join(", ")),
+                &serde_json::Value::Null,
+            )?;
+        }
+        Ok(())
     }
 
     fn stuck(&self, app: &str, why: &str) -> Result<String> {
@@ -397,6 +416,31 @@ fn stuck(canon: &Canon, app: &str, why: &str) -> Result<()> {
         canon.set_status(app, Status::Stuck, Some(why))?;
     }
     Ok(())
+}
+
+/// Set each secret the lease wants but Hush lacks the way compose would
+/// have: `K: ${S:-d}` takes `S` when that is set (e.g. imported from a
+/// `.env`), else the committed default `d`. Returns the names it set.
+pub fn interpolate(hush: &Hush, app: &str, lease: &lease::Lease, survey: &Survey) -> Result<Vec<String>> {
+    let Some(compose) = &survey.compose else { return Ok(vec![]) };
+    let mut filled = Vec::new();
+    for name in lease.services.iter().flat_map(|s| &s.secrets) {
+        if filled.contains(name) || hush.get(app, name)?.is_some() {
+            continue;
+        }
+        let Some((source, default)) = compose.services.iter().find_map(|c| c.interpolated.get(name)) else {
+            continue;
+        };
+        let value = match hush.get(app, source)? {
+            Some(v) if source != name => Some(v),
+            _ => default.clone().map(Secret::new),
+        };
+        if let Some(v) = value {
+            hush.set(app, name, &v)?;
+            filled.push(name.clone());
+        }
+    }
+    Ok(filled)
 }
 
 /// Fill in the secrets a plan asks Henry to make. A random one, once made,

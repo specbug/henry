@@ -266,3 +266,58 @@ async fn every_kind_of_volume_is_backed_up_drilled_and_restored() {
 
     cleanup(&engine);
 }
+
+/// hostd's volume, copied into Henry's while hostd's container keeps
+/// running on it.
+#[tokio::test]
+async fn seed_copies_a_volume_in_use_and_leaves_its_user_running() {
+    if std::env::var("HENRY_ENGINE_TESTS").ok().as_deref() != Some("1") {
+        return;
+    }
+    let engine = if std::process::Command::new("docker").arg("info").output().is_ok_and(|o| o.status.success()) {
+        "docker"
+    } else {
+        "podman"
+    };
+    let (from, to, user) = ("seedt-src", "henry-seedt-data", "seedt-hostd");
+    let clean = || {
+        let _ = std::process::Command::new(engine).args(["rm", "-f", user, "seedt-henry"]).output();
+        for v in [from, to] {
+            let _ = std::process::Command::new(engine).args(["volume", "rm", "-f", v]).output();
+        }
+    };
+    clean();
+    sh(engine, &["volume", "create", from]);
+    sh(
+        engine,
+        &[
+            "run",
+            "--rm",
+            "-v",
+            &format!("{from}:/d"),
+            "alpine:3.20",
+            "sh",
+            "-c",
+            "mkdir -p /d/up && echo db > /d/app.db && echo pic > /d/up/a.png",
+        ],
+    );
+    sh(engine, &["run", "-d", "--name", user, "-v", &format!("{from}:/d"), "alpine:3.20", "sleep", "300"]);
+    let tool =
+        Engine { program: engine.into(), helper: "henry/ark-helper:test".into(), timeout: Duration::from_secs(300) };
+
+    assert!(matches!(ark::seed(&tool, "nope-volume", to, "seedt").await, Err(ark::Error::Refused(_))));
+    assert_eq!(ark::seed(&tool, from, to, "seedt").await.unwrap(), 2);
+    // Again, after the target changed: the copy replaces, it does not merge.
+    sh(engine, &["run", "--rm", "-v", &format!("{to}:/d"), "alpine:3.20", "sh", "-c", "echo stale > /d/stale"]);
+    assert_eq!(ark::seed(&tool, from, to, "seedt").await.unwrap(), 2);
+    let got =
+        sh(engine, &["run", "--rm", "-v", &format!("{to}:/d"), "alpine:3.20", "sh", "-c", "cat /d/app.db /d/up/a.png"]);
+    assert_eq!(got, "db\npic");
+    assert_eq!(sh(engine, &["inspect", "-f", "{{.State.Status}}", user]), "running", "hostd's container is unpaused");
+    assert_eq!(sh(engine, &["volume", "inspect", "-f", "{{index .Labels \"dev.henry.app\"}}", to]), "seedt");
+
+    // Never over a volume Henry is running on.
+    sh(engine, &["run", "-d", "--name", "seedt-henry", "-v", &format!("{to}:/d"), "alpine:3.20", "sleep", "300"]);
+    assert!(matches!(ark::seed(&tool, from, to, "seedt").await, Err(ark::Error::Refused(_))));
+    clean();
+}

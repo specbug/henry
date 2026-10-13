@@ -49,6 +49,35 @@ enum Cmd {
         #[arg(long)]
         branch: Option<String>,
     },
+    /// Move an app over from hostd: seal its `.env` in Hush, copy hostd's
+    /// volume, and onboard it. hostd keeps serving it until `henry cutover`.
+    Adopt {
+        /// The repo, e.g. https://github.com/you/odyssey.
+        repo: String,
+        /// The app's name. Default: the repo's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// The public hostname hostd serves it on, e.g. odyssey.example.com.
+        #[arg(long)]
+        hostname: Option<String>,
+        /// The branch hostd deploys (its deploy.yml says).
+        #[arg(long)]
+        branch: Option<String>,
+        /// The app's .env, as hostd ran it. Values are sealed, never shown.
+        #[arg(long)]
+        env: Option<PathBuf>,
+        /// hostd's volume to copy, from deploy.yml's `backup.volume`.
+        #[arg(long)]
+        volume: Option<String>,
+    },
+    /// Send an adopted app's public traffic to Henry: a final copy of the
+    /// data, then its DNS record. hostd must have let the app go.
+    Cutover {
+        app: String,
+        /// Put the DNS record back as it was, for hostd.
+        #[arg(long)]
+        back: bool,
+    },
     /// Every plan onboarding weighed for an app, newest first, in full.
     Plans {
         app: String,
@@ -218,6 +247,41 @@ pub fn run(args: Args) -> Result<ExitCode> {
             onboard(&home, &repo, name.as_deref(), hostname.as_deref(), branch.as_deref())?
         }
         Cmd::Plans { app, limit } => plans(&home, &app, limit)?,
+        Cmd::Adopt { repo, name, hostname, branch, env, volume } => {
+            let name = match name {
+                Some(n) => n,
+                None => draft::name_for(&repo).context("cannot tell the app's name from the URL; pass --name")?,
+            };
+            let config = Config::load(&home.config())?;
+            let canon = Arc::new(canon(&home)?);
+            let hush = open_hush(&home, canon.clone())?;
+            let a = crate::adopt::Adopt {
+                repo: &repo,
+                name: &name,
+                hostname: hostname.as_deref(),
+                branch: branch.as_deref(),
+                env: env.as_deref(),
+                volume: volume.as_deref(),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            for line in rt.block_on(crate::adopt::adopt(&config, &canon, &hush, &a))? {
+                println!("{line}");
+            }
+        }
+        Cmd::Cutover { app, back } => {
+            let config = Config::load(&home.config())?;
+            let canon = Arc::new(canon(&home)?);
+            let hush = open_hush(&home, canon.clone())?;
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let said = if back {
+                rt.block_on(crate::adopt::back(&config, &canon, &hush, &app))?
+            } else {
+                rt.block_on(crate::adopt::cutover(&config, canon.clone(), &hush, &app))?
+            };
+            for line in said {
+                println!("{line}");
+            }
+        }
         Cmd::Add { lease, repo } => add(&home, &lease, &repo)?,
         Cmd::Apps => apps(&home)?,
         Cmd::Show { app } => show(&home, &app)?,

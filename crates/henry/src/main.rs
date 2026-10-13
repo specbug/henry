@@ -1,5 +1,6 @@
 //! Henry: rules the home. Hosts your GitHub repos on a Mac mini.
 
+mod adopt;
 mod ai;
 mod backup;
 mod cli;
