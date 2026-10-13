@@ -80,6 +80,14 @@ const MIGRATIONS: &[&str] = &[
         host_port INTEGER NOT NULL UNIQUE,
         PRIMARY KEY (app, service, slot)
     ) STRICT;",
+    // 3: Proof's progress through a release's trial, so a soak cut off by a
+    // reboot resumes rather than restarts. `state` is Proof's own JSON.
+    "CREATE TABLE proofs (
+        release    INTEGER PRIMARY KEY REFERENCES releases(id) ON DELETE CASCADE,
+        app        TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

@@ -1,0 +1,21 @@
+[package]
+name = "hinge"
+description = "What every request turns on: Caddy routes and the Cloudflare tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canon.workspace = true
+lease.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

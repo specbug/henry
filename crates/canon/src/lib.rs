@@ -486,6 +486,25 @@ impl Canon {
         Ok(Wanted { live, candidate })
     }
 
+    // --- proofs ----------------------------------------------------------
+
+    /// Proof's saved progress on a release, if it has started.
+    pub fn proof(&self, release: i64) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn()?;
+        let text: Option<String> =
+            conn.query_row("SELECT state FROM proofs WHERE release = ?1", [release], |r| r.get(0)).optional()?;
+        Ok(text.map(json))
+    }
+
+    pub fn put_proof(&self, release: i64, app: &str, state: &serde_json::Value) -> Result<()> {
+        self.conn()?.execute(
+            "INSERT INTO proofs (release, app, state, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (release) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+            params![release, app, state.to_string(), now_ms()],
+        )?;
+        Ok(())
+    }
+
     // --- host ports ------------------------------------------------------
 
     /// The host port for one service slot, allocating the lowest free port in
@@ -514,6 +533,19 @@ impl Canon {
         )?;
         tx.commit()?;
         Ok(port)
+    }
+
+    /// The host port already given to a slot, without allocating one.
+    pub fn existing_port(&self, app: &str, service: &str, slot: i64) -> Result<Option<u16>> {
+        let conn = self.conn()?;
+        let port: Option<i64> = conn
+            .query_row(
+                "SELECT host_port FROM ports WHERE app = ?1 AND service = ?2 AND slot = ?3",
+                params![app, service, slot],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(port.map(|p| p as u16))
     }
 
     /// Release every port of `app` whose slot is not in `keep`.

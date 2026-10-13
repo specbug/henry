@@ -27,8 +27,8 @@ pub mod label {
     pub const MANAGED: &str = "dev.henry.managed";
     pub const APP: &str = "dev.henry.app";
     pub const SERVICE: &str = "dev.henry.service";
+    /// Absent on a stateful container, which belongs to no single release.
     pub const RELEASE: &str = "dev.henry.release";
-    pub const ROLE: &str = "dev.henry.role";
     pub const SPEC: &str = "dev.henry.spec";
 }
 
@@ -69,6 +69,8 @@ pub struct Container {
     pub name: String,
     pub state: State,
     pub labels: Labels,
+    /// Network name to the aliases the container answers to there.
+    pub networks: BTreeMap<String, Vec<String>>,
 }
 
 impl Container {
@@ -112,8 +114,14 @@ pub trait Runtime: Send + Sync {
     /// Remove a container, stopping it first if needed. Its volumes stay.
     fn remove(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
 
+    /// Change the names a running container answers to on a network,
+    /// without restarting it. This is how a release goes live in place.
+    fn set_aliases(&self, id: &str, network: &str, aliases: &[String]) -> impl Future<Output = Result<()>> + Send;
+
     fn inspect(&self, id: &str) -> impl Future<Output = Result<Inspection>> + Send;
-    fn logs(&self, id: &str, tail: usize) -> impl Future<Output = Result<String>> + Send;
+    /// Log lines, at most `tail` of them, and only those written since
+    /// `since` (Unix seconds) when given.
+    fn logs(&self, id: &str, tail: usize, since: Option<i64>) -> impl Future<Output = Result<String>> + Send;
 }
 
 /// Share one runtime between Plumb and whoever else needs to look at it.
@@ -145,11 +153,14 @@ impl<T: Runtime> Runtime for std::sync::Arc<T> {
     async fn remove(&self, id: &str) -> Result<()> {
         (**self).remove(id).await
     }
+    async fn set_aliases(&self, id: &str, network: &str, aliases: &[String]) -> Result<()> {
+        (**self).set_aliases(id, network, aliases).await
+    }
     async fn inspect(&self, id: &str) -> Result<Inspection> {
         (**self).inspect(id).await
     }
-    async fn logs(&self, id: &str, tail: usize) -> Result<String> {
-        (**self).logs(id, tail).await
+    async fn logs(&self, id: &str, tail: usize, since: Option<i64>) -> Result<String> {
+        (**self).logs(id, tail, since).await
     }
 }
 

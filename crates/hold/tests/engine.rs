@@ -72,6 +72,15 @@ async fn a_container_round_trip_on_a_real_engine() {
     assert_eq!(mine.state, State::Running);
     assert_eq!(mine.spec_hash(), Some(spec.hash().as_str()));
     assert_eq!(mine.label(label::APP), Some(tag.as_str()));
+    assert!(mine.networks[&tag].contains(&"web".to_owned()), "aliases are reported: {:?}", mine.networks);
+
+    // Aliases move in place: same container, still running, new name.
+    engine.set_aliases(&id, &tag, &["api".into()]).await.unwrap();
+    let moved = engine.list().await.unwrap().into_iter().find(|c| c.name == tag).unwrap();
+    assert_eq!(moved.id, id);
+    assert_eq!(moved.state, State::Running);
+    assert!(moved.networks[&tag].contains(&"api".to_owned()), "{:?}", moved.networks);
+    assert!(!moved.networks[&tag].contains(&"web".to_owned()));
 
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut answered = None;
@@ -84,7 +93,7 @@ async fn a_container_round_trip_on_a_real_engine() {
     let seen = engine.inspect(&id).await.unwrap();
     assert_eq!(seen.state, State::Running);
     assert_eq!(seen.restart_count, 0);
-    assert!(engine.logs(&id, 50).await.is_ok());
+    assert!(engine.logs(&id, 50, None).await.is_ok());
 
     engine.stop(&id, Duration::from_secs(5)).await.unwrap();
     assert_eq!(engine.inspect(&id).await.unwrap().state, State::Exited);

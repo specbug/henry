@@ -2,6 +2,7 @@
 
 mod cli;
 mod daemon;
+mod edge;
 mod home;
 mod host;
 mod http;

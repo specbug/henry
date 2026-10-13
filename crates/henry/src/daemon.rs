@@ -3,8 +3,10 @@
 //! It holds the single-instance lock, recovers interrupted jobs, and then runs
 //! four things side by side:
 //!
-//! - Plumb, every tick. It connects lazily: if the VM is down at boot, the
-//!   first passes bring it up rather than Henry refusing to start.
+//! - Plumb, Proof, then Hinge, every tick. Plumb connects lazily: if the VM is
+//!   down at boot, the first passes bring it up rather than Henry refusing to
+//!   start. Proof judges what Plumb runs, and Hinge routes what Proof promoted
+//!   in the same tick.
 //! - The job worker, one job at a time (builds are heavy).
 //! - Press's poll of every auto-deploying branch.
 //! - The loopback HTTP endpoint, for GitHub's push webhook.
@@ -25,6 +27,7 @@ use plumb::{Plumb, Settings};
 use press::Press;
 use press::build::CliBuilder;
 use press::git::Git;
+use proof::Proof;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 
@@ -49,6 +52,10 @@ pub fn run(home: &Home) -> Result<()> {
     let hush = Arc::new(crate::cli::open_hush(home, canon.clone())?);
     let host_secrets = hush.names(hush::HOST)?.len();
 
+    crate::edge::prepare(home, &config, &hush)?;
+    let mut hinge = crate::edge::hinge(&config, canon.clone(), &hush)?;
+    let mut last_hinge_error: Option<String> = None;
+
     let version = env!("CARGO_PKG_VERSION");
     canon.record(None, "henry.started", &format!("Henry {version} started"), &serde_json::Value::Null)?;
     info!(version, home = %home.root.display(), host_secrets, default_model = ?config.ai.default_model, "Henry is up");
@@ -65,7 +72,7 @@ pub fn run(home: &Home) -> Result<()> {
         let mut hup = signal(SignalKind::hangup())?;
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut plumb: Option<Plumb<Engine, Host>> = None;
+        let mut engine: Option<(Plumb<Engine, Host>, Proof<Engine>)> = None;
         let mut last_connect_error: Option<String> = None;
         loop {
             tokio::select! {
@@ -74,19 +81,27 @@ pub fn run(home: &Home) -> Result<()> {
                 _ = hup.recv() => match Config::load(&home.config()).and_then(|c| c.limits().map(|_| c)) {
                     Ok(c) => {
                         config = c;
-                        // Engine settings take effect on the next connect.
-                        plumb = None;
+                        // Engine and Proof settings take effect on the next connect.
+                        engine = None;
+                        // Edge settings and Henry's own secrets, now.
+                        if let Err(e) = crate::edge::prepare(home, &config, &hush) {
+                            warn!("edge files not rewritten: {e:#}");
+                        }
+                        match crate::edge::hinge(&config, canon.clone(), &hush) {
+                            Ok(h) => hinge = h,
+                            Err(e) => warn!("keeping the old routing setup: {e:#}"),
+                        }
                         info!(default_model = ?config.ai.default_model, "configuration reloaded");
                     }
                     Err(e) => warn!("configuration not reloaded, keeping the old one: {e:#}"),
                 },
                 _ = tick.tick() => {
-                    if plumb.is_none() {
+                    if engine.is_none() {
                         match connect(&config, canon.clone(), hush.clone()).await {
-                            Ok(p) => {
+                            Ok(e) => {
                                 info!("connected to the container engine");
                                 last_connect_error = None;
-                                plumb = Some(p);
+                                engine = Some(e);
                             }
                             Err(e) => {
                                 let e = format!("{e:#}");
@@ -98,10 +113,29 @@ pub fn run(home: &Home) -> Result<()> {
                             }
                         }
                     }
-                    if let Some(p) = &plumb
-                        && let Err(e) = p.pass().await
-                    {
-                        warn!("plumb pass failed: {e}");
+                    if let Some((plumb, proof)) = &engine {
+                        if let Err(e) = plumb.pass().await {
+                            warn!("plumb pass failed: {e}");
+                        }
+                        match proof.pass().await {
+                            Ok(r) => {
+                                if let Some(why) = r.skipped {
+                                    warn!("proof skipped a pass: {why}");
+                                }
+                            }
+                            Err(e) => warn!("proof pass failed: {e}"),
+                        }
+                    }
+                    match hinge.pass().await {
+                        Ok(_) => last_hinge_error = None,
+                        Err(e) => {
+                            let e = e.to_string();
+                            if last_hinge_error.as_deref() != Some(e.as_str()) {
+                                warn!("routing not updated: {e}");
+                                canon.record(None, "hinge.problem", &e, &serde_json::Value::Null)?;
+                                last_hinge_error = Some(e);
+                            }
+                        }
                     }
                 }
             }
@@ -224,11 +258,12 @@ async fn poll(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
 
 /// Bring the engine up and connect to it. The daemon is the only process
 /// that ever starts the Podman machine.
-async fn connect(config: &Config, canon: Arc<Canon>, hush: Arc<Hush>) -> Result<Plumb<Engine, Host>> {
+async fn connect(config: &Config, canon: Arc<Canon>, hush: Arc<Hush>) -> Result<(Plumb<Engine, Host>, Proof<Engine>)> {
     let host = Host::from_config(&config.engine)?;
     host.ensure_up().await?;
     let engine = host.connect().await?;
-    Ok(Plumb::new(canon, hush, engine, host, Settings::default()))
+    let proof = Proof::new(canon.clone(), engine.clone(), config.proof.settings(&config.hinge.listen));
+    Ok((Plumb::new(canon, hush, engine, host, Settings::default()), proof))
 }
 
 /// Hold `henry.lock` for the life of the process. The OS drops the lock when

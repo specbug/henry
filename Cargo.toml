@@ -14,21 +14,24 @@ rust-version = "1.89"
 lease = { path = "crates/lease" }
 hush = { path = "crates/hush" }
 canon = { path = "crates/canon" }
+hinge = { path = "crates/hinge" }
 hold = { path = "crates/hold" }
 plumb = { path = "crates/plumb" }
 press = { path = "crates/press" }
+proof = { path = "crates/proof" }
 
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 base64 = "0.22"
 bollard = "0.21"
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.12"
 libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

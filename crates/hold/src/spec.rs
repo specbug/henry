@@ -65,7 +65,6 @@ struct Hashed<'a> {
     secret_stamp: &'a str,
     labels: &'a Labels,
     network: &'a str,
-    aliases: &'a [String],
     mounts: &'a [Mount],
     publish: &'a Option<Publish>,
     memory_bytes: u64,
@@ -74,7 +73,8 @@ struct Hashed<'a> {
 
 impl ContainerSpec {
     /// A short, stable fingerprint. A running container whose label differs
-    /// from this is stale and gets recreated.
+    /// from this is stale and gets recreated. Aliases are left out: they
+    /// change in place, with `Runtime::set_aliases`, when a release goes live.
     pub fn hash(&self) -> String {
         let mut env: Vec<_> =
             self.env.iter().map(|e| (e.name.as_str(), (!e.secret).then_some(e.value.as_str()))).collect();
@@ -86,7 +86,6 @@ impl ContainerSpec {
             secret_stamp: &self.secret_stamp,
             labels: &self.labels,
             network: &self.network,
-            aliases: &self.aliases,
             mounts: &self.mounts,
             publish: &self.publish,
             memory_bytes: self.memory_bytes,
@@ -138,6 +137,10 @@ mod tests {
         let mut d = spec();
         d.env.reverse();
         assert_eq!(a.hash(), d.hash(), "env order does not matter");
+
+        let mut e = spec();
+        e.aliases = vec!["web".into()];
+        assert_eq!(a.hash(), e.hash(), "aliases move in place, so they do not recreate");
     }
 
     #[test]

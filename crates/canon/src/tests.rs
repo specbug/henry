@@ -230,6 +230,18 @@ fn wanted_releases_are_live_plus_the_newest_trial() {
 }
 
 #[test]
+fn proof_progress_is_saved_per_release() {
+    let db = db_with("draw", "draw.example.com");
+    let r = db.create_release("draw", "a", "c").unwrap();
+    assert_eq!(db.proof(r.id).unwrap(), None);
+    db.put_proof(r.id, "draw", &serde_json::json!({ "stage": "soak", "streak": 3 })).unwrap();
+    db.put_proof(r.id, "draw", &serde_json::json!({ "stage": "soak", "streak": 4 })).unwrap();
+    assert_eq!(db.proof(r.id).unwrap().unwrap()["streak"], 4);
+    db.remove_app("draw").unwrap();
+    assert_eq!(db.proof(r.id).unwrap(), None, "proofs go with their release");
+}
+
+#[test]
 fn ports_are_stable_unique_and_freed() {
     let db = db_with("draw", "draw.example.com");
     let (c, t) = lease_without_route("odyssey");

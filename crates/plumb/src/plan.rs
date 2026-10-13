@@ -27,7 +27,7 @@ pub enum Role {
 }
 
 impl Role {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Role::Live => "live",
             Role::Candidate => "candidate",
@@ -168,13 +168,15 @@ pub fn plan_app(canon: &Canon, hush: &Hush, app: &App, settings: &Settings) -> R
             let slot = if stateful { 0 } else { release.id };
             let name = container_name(&app.name, &service.name, (!stateful).then_some(release.id));
 
-            let publish = match (&service.public, service.port) {
-                (Some(_), Some(port)) => Some(Publish {
+            // Every service with a port is published on loopback: Hinge routes
+            // the public ones, and Proof probes all of them from the host.
+            let publish = match service.port {
+                Some(port) => Some(Publish {
                     container_port: port,
                     host_ip: settings.publish_ip.clone(),
                     host_port: canon.port_for(&app.name, &service.name, slot, settings.ports.clone())?,
                 }),
-                _ => None,
+                None => None,
             };
 
             let mut env: Vec<EnvVar> =
@@ -184,14 +186,18 @@ pub fn plan_app(canon: &Canon, hush: &Hush, app: &App, settings: &Settings) -> R
             {
                 env.push(EnvVar { name: "PORT".into(), value: port.to_string(), secret: false });
             }
-            let mut injected = vec![
-                ("HENRY_APP".to_owned(), app.name.clone()),
-                ("HENRY_SERVICE".to_owned(), service.name.clone()),
-                ("HENRY_RELEASE".to_owned(), release.id.to_string()),
-            ];
+            // A stateful container outlives releases, so nothing in its spec
+            // may name one: no release id, and no stateless peers (whose names
+            // carry a release). Otherwise every push would restart the database.
+            let mut injected =
+                vec![("HENRY_APP".to_owned(), app.name.clone()), ("HENRY_SERVICE".to_owned(), service.name.clone())];
+            if !stateful {
+                injected.push(("HENRY_RELEASE".to_owned(), release.id.to_string()));
+            }
             for peer in &lease.services {
-                if peer.name != service.name {
-                    let peer_release = peer.volumes.is_empty().then_some(release.id);
+                let peer_stateful = !peer.volumes.is_empty();
+                if peer.name != service.name && (peer_stateful || !stateful) {
+                    let peer_release = (!peer_stateful).then_some(release.id);
                     injected.push((host_var(&peer.name), container_name(&app.name, &peer.name, peer_release)));
                 }
             }
@@ -212,12 +218,13 @@ pub fn plan_app(canon: &Canon, hush: &Hush, app: &App, settings: &Settings) -> R
                 mounts.push(Mount { volume, target: v.mount.clone() });
             }
 
-            let labels = Labels::from([
+            let mut labels = Labels::from([
                 (label::APP.to_owned(), app.name.clone()),
                 (label::SERVICE.to_owned(), service.name.clone()),
-                (label::RELEASE.to_owned(), release.id.to_string()),
-                (label::ROLE.to_owned(), role.as_str().to_owned()),
             ]);
+            if !stateful {
+                labels.insert(label::RELEASE.to_owned(), release.id.to_string());
+            }
             // Live and stateful containers answer to the plain service name, so
             // an app that hardcodes `db` still finds it. A candidate does not,
             // so it never steals the live release's traffic.

@@ -118,14 +118,17 @@ async fn containers_get_what_their_lease_promises() {
     assert_eq!(env["HENRY_DB_HOST"], "draw-db");
     assert!(web.env.iter().find(|e| e.name == "TOKEN").unwrap().secret);
     assert!(!format!("{web:?}").contains("t0k3n"));
-    assert_eq!(web.publish.as_ref().map(|p| (p.host_ip.as_str(), p.host_port)), Some(("127.0.0.1", 20000)));
+    let published = web.publish.as_ref().unwrap();
+    assert_eq!((published.host_ip.as_str(), published.container_port), ("127.0.0.1", 8080));
+    assert!((20000..30000).contains(&published.host_port));
     assert!(web.aliases.is_empty(), "a candidate does not answer to the service name");
     assert_eq!(web.memory_bytes, 512 << 20);
 
     let db = w.fake.container("draw-db").unwrap().spec;
     assert_eq!(db.aliases, ["db"]);
     assert_eq!(db.mounts[0].volume, "henry-draw-pg");
-    assert!(db.publish.is_none(), "private services are not published");
+    let db_port = db.publish.as_ref().map(|p| (p.host_ip.as_str(), p.container_port));
+    assert_eq!(db_port, Some(("127.0.0.1", 5432)), "private services are published on loopback, for Proof");
 }
 
 #[tokio::test]
@@ -171,6 +174,7 @@ async fn a_candidate_runs_beside_live_and_replaces_it() {
     w.plumb.pass().await.unwrap();
     assert_eq!(w.names(), ["draw-db", &format!("draw-web-r{r1}"), &format!("draw-web-r{r2}")]);
     let live = w.fake.container(&format!("draw-web-r{r1}")).unwrap().spec;
+    let r1_port = live.publish.as_ref().unwrap().host_port;
     let cand = w.fake.container(&format!("draw-web-r{r2}")).unwrap().spec;
     assert_eq!(live.aliases, ["web"]);
     assert_ne!(live.publish.unwrap().host_port, cand.publish.unwrap().host_port);
@@ -179,11 +183,12 @@ async fn a_candidate_runs_beside_live_and_replaces_it() {
     w.canon.set_release_state(r2, ReleaseState::Live, None).unwrap();
     let report = w.plumb.pass().await.unwrap();
     assert_eq!(report.removed, [format!("draw-web-r{r1}")]);
-    // r2's web is now live, so it is recreated with the service alias.
-    assert_eq!(report.recreated, [format!("draw-web-r{r2}")]);
-    assert_eq!(w.fake.container(&format!("draw-web-r{r2}")).unwrap().spec.aliases, ["web"]);
-    // r1's port went back to the pool.
-    assert_eq!(w.canon.port_for("draw", "web", 99, 20000..30000).unwrap(), 20000);
+    // r2's web is now live: it takes the service alias in place, unrestarted.
+    assert!(report.recreated.is_empty(), "{report:?}");
+    assert_eq!(report.realiased, [format!("draw-web-r{r2}")]);
+    assert_eq!(w.fake.container(&format!("draw-web-r{r2}")).unwrap().aliases, ["web"]);
+    // r1's port went back to the pool, and is the next one handed out.
+    assert_eq!(w.canon.port_for("draw", "web", 99, 20000..30000).unwrap(), r1_port);
 }
 
 #[tokio::test]
@@ -379,4 +384,20 @@ async fn nothing_starts_before_what_it_depends_on() {
     w.fake.take_ops();
     w.plumb.pass().await.unwrap();
     assert!(!w.fake.take_ops().iter().any(|op| op.contains("web")));
+}
+
+#[tokio::test]
+async fn a_new_release_leaves_an_unchanged_database_alone() {
+    let w = world();
+    let r1 = w.trying();
+    w.canon.set_release_state(r1, ReleaseState::Live, None).unwrap();
+    w.plumb.pass().await.unwrap();
+
+    // A new push that changes only the web image.
+    let next = LEASE.replace("draw-web:1", "draw-web:2");
+    w.release("draw", &next, ReleaseState::Trial);
+    w.fake.take_ops();
+    w.plumb.pass().await.unwrap();
+    let ops = w.fake.take_ops();
+    assert!(!ops.iter().any(|op| op.contains("draw-db")), "the database was touched: {ops:?}");
 }

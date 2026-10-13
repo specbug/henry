@@ -25,6 +25,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Caddy, for Hinge's tests
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          curl -fsSL -o caddy.tgz https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_amd64.tar.gz
+          tar xzf caddy.tgz caddy && sudo mv caddy /usr/local/bin/caddy
+          echo "HENRY_CADDY=/usr/local/bin/caddy" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
