@@ -273,7 +273,7 @@ impl<R: Runtime> Proof<R> {
                     t.stage = Stage::Settle;
                     t.stage_at = now_ms();
                     t.streak = 0;
-                } else if now - t.stage_at > self.settings.soak_limit.as_millis() as i64 {
+                } else if now - t.stage_at >= self.settings.soak_limit.as_millis() as i64 {
                     let last = t.last_failure.clone().unwrap_or_default();
                     let why = format!(
                         "health probes never held {} times in a row; last failure: {last}",

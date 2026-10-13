@@ -80,9 +80,11 @@ fn fast() -> Settings {
 }
 
 /// A unique port range per test, so parallel tests never share responders.
+/// It stays below every OS's ephemeral range (32768 and up), where an
+/// unrelated outgoing connection could already hold the port.
 fn ports() -> std::ops::Range<u16> {
     static NEXT: std::sync::atomic::AtomicU16 = AtomicU16::new(0);
-    let base = 42000 + (std::process::id() % 200) as u16 * 100 + NEXT.fetch_add(10, Ordering::SeqCst);
+    let base = 21000 + (std::process::id() % 40) as u16 * 250 + NEXT.fetch_add(10, Ordering::SeqCst);
     base..base + 10
 }
 
