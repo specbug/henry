@@ -8,10 +8,11 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 9 of 10.** Point Henry at a repo and it works out how to
-> run it, builds it, proves it, routes it, backs it up and keeps it current.
-> Glass, the web UI, shows all of it from anywhere, behind Cloudflare Access.
-> Moving the existing apps off hostd is next. See [Build order](#build-order).
+> **Status: all ten milestones built.** Point Henry at a repo and it works out
+> how to run it, builds it, proves it, routes it, backs it up and keeps it
+> current. Glass, the web UI, shows all of it from anywhere, behind Cloudflare
+> Access. Apps already running under hostd move over one at a time with
+> `henry adopt` and `henry cutover`: see [docs/migration.md](docs/migration.md).
 
 ## The parts
 
@@ -412,6 +413,27 @@ access_aud = "<AUD tag>"
 Hinge adds the hostname to the tunnel and DNS like any other route. An app
 cannot claim it.
 
+## Moving an app off hostd
+
+hostd ran each app from its compose file, with a hand-kept `.env`, a named
+volume and a DNS record made by hand. Henry takes one over without a gap in
+proof and with a way back:
+
+1. `henry adopt <repo> --env <.env> --volume <volume>` seals the `.env` in
+   Hush, copies the volume (pausing hostd's container for the moment of the
+   copy), and onboards the repo. Sound reads the compose file as hostd ran it:
+   the same services, env and healthcheck, without the app's own cloudflared.
+   Where `.env` is silent, compose's `${VAR:-default}` fills in, as compose did.
+2. Henry builds and proves the app privately. The DNS record still points at
+   hostd's tunnel, and Henry never edits a record it did not make.
+3. You unregister the app from hostd and stop its stack.
+4. `henry cutover <app>` refuses while anything of hostd's still runs on the
+   volume. Then it copies the final data, waits for the app to be live again,
+   and points that one DNS record at Henry's tunnel, keeping the old record.
+   `henry cutover <app> --back` puts it back.
+
+The step-by-step for odyssey and draw is [docs/migration.md](docs/migration.md).
+
 ## Using it
 
 ```sh
@@ -434,6 +456,8 @@ cargo build --release
 ./target/release/henry reload                    # reread henry.toml and Henry's secrets
 ./target/release/henry install                   # run at login under launchd
 ./target/release/henry open                      # Glass, signed in, in this Mac's browser
+./target/release/henry adopt https://github.com/you/app --env ~/app/.env --volume app-data   # from hostd
+./target/release/henry cutover app               # send its public traffic to Henry (--back undoes)
 ```
 
 Henry keeps everything in `~/Library/Application Support/Henry`, outside
@@ -450,8 +474,8 @@ the paths; `HENRY_HOME` overrides them.
 6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
 7. **Ark** — backups and restore drills.
 8. **Mend and Bench** — upkeep and model eval.
-9. **Glass** — the web UI. *(this)*
-10. **Migration** — move odyssey and draw off hostd.
+9. **Glass** — the web UI.
+10. **Migration** — move odyssey and draw off hostd. *(this)*
 
 ## Development
 

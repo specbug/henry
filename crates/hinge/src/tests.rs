@@ -7,7 +7,7 @@ use canon::serde_json::{self, Value, json};
 use canon::{ReleaseState, Source};
 
 use super::caddy::Caddy;
-use super::cloudflare::{Cloudflare, DnsReport, MANAGED};
+use super::cloudflare::{Cloudflare, DnsReport, MANAGED, TakeOver};
 use super::*;
 
 // --- fakes -----------------------------------------------------------------
@@ -279,6 +279,7 @@ async fn an_unreachable_caddy_is_an_error_not_a_silent_skip() {
 #[derive(Default)]
 struct Cf {
     records: Mutex<BTreeMap<String, (String, String, String)>>, // id -> (name, content, comment)
+    types: Mutex<BTreeMap<String, String>>,                     // id -> type, when not CNAME
     ingress: Mutex<Value>,
     next: Mutex<u32>,
 }
@@ -304,12 +305,16 @@ async fn mock_cloudflare() -> (String, Arc<Cf>) {
         .route(
             "/zones/z1/dns_records",
             get(|State(s): S| async move {
+                let types = s.types.lock().unwrap().clone();
                 let r: Vec<Value> = s
                     .records
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|(id, (n, c, m))| json!({ "id": id, "name": n, "content": c, "comment": m }))
+                    .map(|(id, (n, c, m))| {
+                        let t = types.get(id).cloned().unwrap_or_else(|| "CNAME".into());
+                        json!({ "id": id, "type": t, "name": n, "content": c, "comment": m, "proxied": true, "ttl": 1 })
+                    })
                     .collect();
                 ok(json!(r))
             })
@@ -409,6 +414,46 @@ async fn dns_is_created_fixed_and_cleaned_but_only_where_henry_owns_it() {
             .filter(|(n, _, _)| n == "a.example.com")
             .all(|(_, c, m)| c == "tun.cfargotunnel.com" && m == MANAGED)
     );
+}
+
+#[tokio::test]
+async fn a_cutover_takes_over_a_hand_made_record_and_can_give_it_back() {
+    let (base, cf) = mock_cloudflare().await;
+    let api = Cloudflare::new(&base, "acct", "tun", vec!["example.com".into()], "token");
+    cf.records
+        .lock()
+        .unwrap()
+        .insert("hostd".into(), ("odyssey.example.com".into(), "hostd-tunnel.cfargotunnel.com".into(), "".into()));
+    // Sync never touches it ...
+    api.sync_dns(&["odyssey.example.com".into()]).await.unwrap();
+    assert_eq!(cf.records.lock().unwrap()["hostd"].1, "hostd-tunnel.cfargotunnel.com");
+    // ... the cutover does, and keeps what was there.
+    let TakeOver::Replaced(old) = api.take_over("odyssey.example.com").await.unwrap() else { panic!() };
+    assert_eq!(old["content"], "hostd-tunnel.cfargotunnel.com");
+    assert_eq!(
+        cf.records.lock().unwrap()["hostd"],
+        ("odyssey.example.com".into(), "tun.cfargotunnel.com".into(), MANAGED.into())
+    );
+    assert_eq!(api.take_over("odyssey.example.com").await.unwrap(), TakeOver::Already);
+    let report = api.sync_dns(&["odyssey.example.com".into()]).await.unwrap();
+    assert!(report.skipped.is_empty() && report.updated.is_empty(), "{report:?}");
+
+    api.give_back("odyssey.example.com", Some(&old)).await.unwrap();
+    assert_eq!(
+        cf.records.lock().unwrap()["hostd"],
+        ("odyssey.example.com".into(), "hostd-tunnel.cfargotunnel.com".into(), "".into())
+    );
+
+    // A hostname with no record gets one, and giving it back removes it.
+    assert_eq!(api.take_over("draw.example.com").await.unwrap(), TakeOver::Created);
+    api.give_back("draw.example.com", None).await.unwrap();
+    assert!(!names(&cf).contains(&"draw.example.com".to_owned()));
+
+    // An A record is not Henry's to turn into a CNAME.
+    cf.records.lock().unwrap().insert("a".into(), ("bare.example.com".into(), "203.0.113.7".into(), "".into()));
+    cf.types.lock().unwrap().insert("a".into(), "A".into());
+    assert!(matches!(api.take_over("bare.example.com").await, Err(Error::Refused(..))));
+    assert!(api.take_over("x.other.org").await.is_err(), "outside the zones");
 }
 
 #[tokio::test]

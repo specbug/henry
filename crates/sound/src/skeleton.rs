@@ -168,9 +168,21 @@ impl Survey {
         let mut generate = Vec::new();
         let main = main_service(&services);
         self.add_backing(&mut services, main.as_deref(), &mut generate, &mut gaps);
+        // A compose file already says which service gets which variable: only
+        // a service that loads an `env_file` gets what the repo documents.
+        let configured: Vec<String> = match &self.compose {
+            Some(c) if !c.services.is_empty() => {
+                c.services.iter().filter(|c| c.env_file).map(|c| lease_name(&c.name)).collect()
+            }
+            _ => main.iter().cloned().collect(),
+        };
+        for name in &configured {
+            if let Some(svc) = services.iter_mut().find(|s| &s.name == name) {
+                self.add_config(svc, &mut gaps);
+            }
+        }
         if let Some(main) = &main {
             let svc = services.iter_mut().find(|s| &s.name == main).expect("the main service exists");
-            self.add_config(svc, &mut gaps);
             if let Some(host) = ask.hostname {
                 if svc.port.is_some() {
                     svc.public = true;
@@ -243,7 +255,20 @@ impl Survey {
         let has = |services: &Vec<Svc>, need: Need| {
             services.iter().find(|s| svc_kind(s) == Some(need)).map(|s| s.name.clone())
         };
-        if self.needs.contains(&Need::Postgres) {
+        // A database URL the repo spells out for another engine (SQLite, say)
+        // means the code's Postgres support is not what this app uses.
+        let other_db = services.iter().find_map(|s| {
+            ["DATABASE_URL", "POSTGRES_URL"]
+                .iter()
+                .find_map(|k| s.env.get(*k).filter(|v| !v.starts_with("postgres")).map(|v| (s.name.clone(), v.clone())))
+        });
+        if let Some((svc, url)) = &other_db
+            && self.needs.contains(&Need::Postgres)
+        {
+            let scheme = url.split(':').next().unwrap_or_default();
+            gaps.push(format!("`{svc}` is given a {scheme} database by the repo, so no Postgres was added"));
+        }
+        if self.needs.contains(&Need::Postgres) && other_db.is_none() {
             let db = match has(services, Need::Postgres) {
                 Some(name) => name,
                 None => {
@@ -378,6 +403,10 @@ fn from_compose(compose: &[ComposeService], gaps: &mut Vec<String>) -> Vec<Svc> 
         compose.iter().filter(|c| c.image.is_some() || c.build.is_some()).map(|c| lease_name(&c.name)).collect();
     for c in compose {
         let name = lease_name(&c.name);
+        if c.image.as_deref().is_some_and(|i| i.contains("cloudflared")) {
+            gaps.push(format!("`{name}` is the app's own tunnel; Henry's tunnel and proxy take its place"));
+            continue;
+        }
         let kind = c.image.as_deref().and_then(image_kind);
         let build = match (&c.build, &c.image) {
             (Some((context, dockerfile)), _) => {
@@ -401,22 +430,26 @@ fn from_compose(compose: &[ComposeService], gaps: &mut Vec<String>) -> Vec<Svc> 
             ));
             continue;
         };
-        let health = match kind {
-            Some(Need::Postgres) => "postgres = true",
-            Some(Need::Redis) => "redis = true",
-            None => "tcp = true",
+        let health = match (kind, &c.health) {
+            (Some(Need::Postgres), _) => "postgres = true".to_owned(),
+            (Some(Need::Redis), _) => "redis = true".to_owned(),
+            // The repo's own healthcheck, if it asks this port over HTTP.
+            (None, Some((p, path))) if *p == port => format!("http = {}", q(path)),
+            (None, _) => "tcp = true".to_owned(),
         };
         let mut svc = Svc {
             name: name.clone(),
             build,
             port: Some(port),
             command: c.command.clone(),
-            health: Some(health.into()),
+            health: Some(health),
             ..Svc::default()
         };
         for (k, v) in &c.env {
             match v {
-                Some(v) if !looks_secret(k) => {
+                // Written into the repo, so not a secret; a database URL is
+                // kept only when it carries no credentials.
+                Some(v) if !looks_secret(k) || (is_generated_url(k) && !v.contains('@')) => {
                     svc.env.insert(k.clone(), v.clone());
                 }
                 _ if k == "POSTGRES_PASSWORD" || is_generated_url(k) => {} // generated below

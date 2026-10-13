@@ -67,9 +67,9 @@ pub fn own_routes(config: &Config) -> Result<Vec<Route>> {
     Ok(routes)
 }
 
-pub fn hinge(config: &Config, canon: Arc<Canon>, hush: &Hush) -> Result<Hinge<Caddy, Cloudflare>> {
-    let caddy = Caddy::new(config.hinge.admin.clone(), config.hinge.listen.clone());
-    let tunnel = match &config.cloudflare {
+/// The Cloudflare API client, when `[cloudflare]` and its token are set.
+pub fn cloudflare(config: &Config, hush: &Hush) -> Result<Option<Cloudflare>> {
+    Ok(match &config.cloudflare {
         None => None,
         Some(cf) => match hush.get(HOST, API_TOKEN)? {
             Some(token) => Some(Cloudflare::new(&cf.api, &cf.account, &cf.tunnel, cf.zones.clone(), token.expose())),
@@ -78,7 +78,12 @@ pub fn hinge(config: &Config, canon: Arc<Canon>, hush: &Hush) -> Result<Hinge<Ca
                 None
             }
         },
-    };
+    })
+}
+
+pub fn hinge(config: &Config, canon: Arc<Canon>, hush: &Hush) -> Result<Hinge<Caddy, Cloudflare>> {
+    let caddy = Caddy::new(config.hinge.admin.clone(), config.hinge.listen.clone());
+    let tunnel = cloudflare(config, hush)?;
     let settings = Settings {
         origin: format!("http://{}", config.hinge.listen),
         own: own_routes(config)?,

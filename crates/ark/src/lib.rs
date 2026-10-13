@@ -562,6 +562,54 @@ impl Ark {
     }
 }
 
+/// Copy everything in volume `from` into `to`, for an app moving onto Henry
+/// from elsewhere (hostd). `to` is created if missing, labelled as `app`'s,
+/// and emptied first, so running this again gives the same result. Anything
+/// running on `from` is paused for the copy, so it is consistent, and always
+/// unpaused after. Refuses while anything runs on `to`. Returns how many
+/// files `to` then holds.
+pub async fn seed(engine: &Engine, from: &str, to: &str, app: &str) -> Result<u64> {
+    if engine.run(&["volume", "inspect", from]).await.is_err() {
+        return Err(Error::Refused(format!("there is no volume `{from}` to copy from")));
+    }
+    if !engine.users(to).await?.is_empty() {
+        return Err(Error::Refused(format!("`{to}` is in use; stop what runs on it first")));
+    }
+    if engine.run(&["volume", "inspect", to]).await.is_err() {
+        let app_label = format!("dev.henry.app={app}");
+        engine.run(&["volume", "create", "--label", "dev.henry.managed=1", "--label", &app_label, to]).await?;
+    }
+    engine.ensure_helper().await?;
+    let users = engine.users(from).await?;
+    for id in &users {
+        engine.run(&["pause", id]).await?;
+    }
+    let (from_mount, to_mount) = (format!("{from}:/from:ro"), format!("{to}:/v"));
+    let copied = engine
+        .run(&[
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            &from_mount,
+            "-v",
+            &to_mount,
+            &engine.helper,
+            "sh",
+            "-c",
+            "set -eu\nfind /v -mindepth 1 -delete\ntar -C /from -cf - . | tar -C /v -xf -\nfind /v -type f | wc -l",
+        ])
+        .await;
+    for id in &users {
+        if let Err(e) = engine.run(&["unpause", id]).await {
+            warn!(container = %id, "could not unpause after copying its volume: {e}");
+        }
+    }
+    let out = copied?;
+    out.trim().parse().map_err(|_| Error::Engine(format!("the copy reported {out:?}")))
+}
+
 /// Unpause every Henry container left paused, e.g. by a crash mid-backup.
 pub async fn unpause_all(engine: &Engine) {
     let Ok(out) = engine.run(&["ps", "-q", "--filter", "status=paused", "--filter", "label=dev.henry.managed=1"]).await

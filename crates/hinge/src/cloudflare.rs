@@ -16,6 +16,17 @@ use crate::{Error, Result, Tunnel};
 /// The comment on every DNS record Henry owns.
 pub const MANAGED: &str = "managed by henry";
 
+/// What [`Cloudflare::take_over`] did to a hostname's record.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TakeOver {
+    /// It already pointed at this tunnel, as Henry's.
+    Already,
+    /// There was none; Henry made one.
+    Created,
+    /// Henry rewrote this record, kept here so it can be put back.
+    Replaced(Value),
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DnsReport {
     pub created: Vec<String>,
@@ -92,6 +103,94 @@ impl Cloudflare {
             .to_owned();
         self.zone_ids.lock().unwrap().insert(zone.to_owned(), id.clone());
         Ok(id)
+    }
+
+    /// The records named `host`, of any type.
+    async fn records(&self, zone_id: &str, host: &str) -> Result<Vec<Value>> {
+        let res = self
+            .call(reqwest::Method::GET, &format!("/zones/{zone_id}/dns_records?name={host}&per_page=100"), None)
+            .await?;
+        Ok(res["result"].as_array().into_iter().flatten().filter(|r| r["name"] == host).cloned().collect())
+    }
+
+    /// The record `host` has now, as `{type, content, proxied, ttl, comment}`.
+    pub async fn record(&self, host: &str) -> Result<Option<Value>> {
+        let zone = self
+            .zone_of(host)
+            .ok_or_else(|| Error::Refused("Cloudflare", format!("{host} is not in any [cloudflare] zones")))?;
+        let id = self.zone_id(zone).await?;
+        Ok(self.records(&id, host).await?.first().map(|r| {
+            json!({ "type": r["type"], "content": r["content"], "proxied": r["proxied"], "ttl": r["ttl"], "comment": r["comment"] })
+        }))
+    }
+
+    /// Whether a record from [`Cloudflare::record`] is Henry's, for this tunnel.
+    pub fn is_ours(&self, record: &Value) -> bool {
+        record["content"] == self.target().as_str() && record["comment"] == MANAGED
+    }
+
+    /// Point `host` at this tunnel even though Henry did not make its record:
+    /// the cutover of an app from hostd, and only because you asked. The old
+    /// record comes back so [`Cloudflare::give_back`] can restore it.
+    pub async fn take_over(&self, host: &str) -> Result<TakeOver> {
+        let zone = self
+            .zone_of(host)
+            .ok_or_else(|| Error::Refused("Cloudflare", format!("{host} is not in any [cloudflare] zones")))?;
+        let id = self.zone_id(zone).await?;
+        let target = self.target();
+        let record =
+            json!({ "type": "CNAME", "name": host, "content": target, "proxied": true, "ttl": 1, "comment": MANAGED });
+        let existing = self.records(&id, host).await?;
+        if let Some(other) = existing.iter().find(|r| r["type"] != "CNAME") {
+            return Err(Error::Refused(
+                "Cloudflare",
+                format!(
+                    "{host} has a {} record; replace it with a CNAME by hand first",
+                    other["type"].as_str().unwrap_or("?")
+                ),
+            ));
+        }
+        match existing.first() {
+            None => {
+                self.call(reqwest::Method::POST, &format!("/zones/{id}/dns_records"), Some(record)).await?;
+                Ok(TakeOver::Created)
+            }
+            Some(r) if r["content"] == target.as_str() && r["comment"] == MANAGED => Ok(TakeOver::Already),
+            Some(r) => {
+                let rid = r["id"].as_str().unwrap_or_default();
+                self.call(reqwest::Method::PUT, &format!("/zones/{id}/dns_records/{rid}"), Some(record)).await?;
+                let old = json!({ "type": r["type"], "content": r["content"], "proxied": r["proxied"], "ttl": r["ttl"], "comment": r["comment"] });
+                Ok(TakeOver::Replaced(old))
+            }
+        }
+    }
+
+    /// Undo [`Cloudflare::take_over`]: put the old record back, or remove the
+    /// one Henry made.
+    pub async fn give_back(&self, host: &str, old: Option<&Value>) -> Result<()> {
+        let zone = self
+            .zone_of(host)
+            .ok_or_else(|| Error::Refused("Cloudflare", format!("{host} is not in any [cloudflare] zones")))?;
+        let id = self.zone_id(zone).await?;
+        let ours = self.records(&id, host).await?.into_iter().find(|r| r["comment"] == MANAGED);
+        let Some(rid) = ours.as_ref().and_then(|r| r["id"].as_str()) else { return Ok(()) };
+        match old {
+            Some(old) => {
+                let record = json!({
+                    "type": old["type"].as_str().unwrap_or("CNAME"),
+                    "name": host,
+                    "content": old["content"],
+                    "proxied": old["proxied"].as_bool().unwrap_or(true),
+                    "ttl": old["ttl"].as_u64().unwrap_or(1),
+                    "comment": old["comment"].as_str().unwrap_or(""),
+                });
+                self.call(reqwest::Method::PUT, &format!("/zones/{id}/dns_records/{rid}"), Some(record)).await?;
+            }
+            None => {
+                self.call(reqwest::Method::DELETE, &format!("/zones/{id}/dns_records/{rid}"), None).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Every CNAME in a zone, by name: (id, content, comment).

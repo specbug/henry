@@ -300,3 +300,105 @@ fn a_plan_must_fit_the_ask_and_keep_its_files_to_itself() {
     assert!(refused(plan(good, vec![(".henry/Dockerfile", "")], vec![secret("A", Some("{Z}"))])).contains("{Z}"));
     assert!(refused(plan("name = 1", vec![], vec![])).contains("refused"));
 }
+
+/// The shape odyssey and draw had under hostd: an API holding the data
+/// volume and a SQLite URL, an nginx front, and their own cloudflared.
+const HOSTD_COMPOSE: &str = r#"
+name: notes
+services:
+  api:
+    build: ./apps/api
+    restart: always
+    volumes:
+      - notes-data:/data
+    environment:
+      DATABASE_URL: sqlite:////data/notes.db
+      UPLOAD_DIR: /data/uploads
+      META_API_KEY: ${META_API_KEY:-}
+      META_MODEL: ${META_MODEL:-muse-spark}
+      CORS_ORIGINS: ${ALLOWED_ORIGINS:-https://notes.example.com}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-m", "3", "http://localhost:8000/health"]
+  web:
+    build: ./apps/web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - web
+volumes:
+  notes-data:
+    name: notes-data
+"#;
+
+fn hostd_repo() -> tempfile::TempDir {
+    repo(&[
+        ("compose.yml", HOSTD_COMPOSE),
+        ("apps/api/Dockerfile", "FROM python:3.13\nEXPOSE 8000\n"),
+        ("apps/api/requirements.txt", "fastapi\nsqlalchemy\n"),
+        ("apps/api/main.py", "import os\nurl = os.environ['DATABASE_URL']\nkey = os.getenv('META_API_KEY')\n"),
+        ("apps/web/Dockerfile", "FROM nginx:alpine\n"),
+        (".env.example", "# Meta Model API key\nMETA_API_KEY=\n# Cloudflare tunnel token\nCLOUDFLARE_TUNNEL_TOKEN=\n"),
+    ])
+}
+
+#[test]
+fn a_hostd_compose_stack_runs_as_it_did() {
+    let r = hostd_repo();
+    let survey = scan(&r);
+    let ask = Ask { app: "notes", branch: "main", hostname: Some("notes.example.com") };
+    let s = survey.skeleton(&ask).unwrap();
+    let lease = checked(&s, &ask);
+    let names: Vec<&str> = lease.services.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["api", "web"], "no invented Postgres, and no second tunnel");
+
+    let api = lease.service("api").unwrap();
+    assert_eq!(api.env.get("DATABASE_URL").map(String::as_str), Some("sqlite:////data/notes.db"));
+    assert_eq!(api.health, Health::Http { path: "/health".into() }, "the repo's own healthcheck");
+    assert_eq!(api.volumes[0].name, "notes-data");
+    assert!(api.secrets.contains(&"META_MODEL".to_owned()) && api.secrets.contains(&"CORS_ORIGINS".to_owned()));
+
+    let web = lease.service("web").unwrap();
+    assert!(web.public.is_some());
+    assert!(web.secrets.is_empty(), "compose gives web nothing, so neither does the lease: {:?}", web.secrets);
+    assert!(s.gaps.iter().any(|g| g.contains("own tunnel")), "{:?}", s.gaps);
+    assert!(s.gaps.iter().any(|g| g.contains("sqlite database")), "{:?}", s.gaps);
+
+    let api_compose = &survey.compose.as_ref().unwrap().services[0];
+    assert_eq!(api_compose.interpolated["META_MODEL"], ("META_MODEL".into(), Some("muse-spark".into())));
+    assert_eq!(api_compose.interpolated["META_API_KEY"], ("META_API_KEY".into(), Some(String::new())));
+    assert_eq!(
+        api_compose.interpolated["CORS_ORIGINS"],
+        ("ALLOWED_ORIGINS".into(), Some("https://notes.example.com".into()))
+    );
+}
+
+#[test]
+fn a_service_that_loads_an_env_file_gets_the_documented_config() {
+    let compose = "services:\n  app:\n    build: .\n    ports: [\"8080:8080\"]\n    env_file: .env\n  worker:\n    build: .\n    ports: [\"9000:9000\"]\n";
+    let r = repo(&[
+        ("compose.yml", compose),
+        ("Dockerfile", "FROM node:22\n"),
+        ("index.js", "const k = process.env.STRIPE_SECRET_KEY;\n"),
+        (".env.example", "# Stripe\nSTRIPE_SECRET_KEY=\n"),
+    ]);
+    let lease = lease_of(&scan(&r).skeleton(&ask()).unwrap());
+    assert_eq!(lease.service("app").unwrap().secrets, ["STRIPE_SECRET_KEY"]);
+    assert!(lease.service("worker").unwrap().secrets.is_empty());
+}
+
+#[test]
+fn a_database_url_with_credentials_stays_a_secret() {
+    let compose = "services:\n  app:\n    build: .\n    ports: [\"8080:8080\"]\n    environment:\n      DATABASE_URL: postgres://app:hunter2@db:5432/app\n";
+    let r = repo(&[("compose.yml", compose), ("Dockerfile", "FROM node:22\n")]);
+    let s = scan(&r).skeleton(&ask()).unwrap();
+    assert!(!s.plan.lease.contains("hunter2"), "{}", s.plan.lease);
+}

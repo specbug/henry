@@ -363,3 +363,27 @@ fn a_repo_url_suggests_a_name() {
     assert_eq!(name_for("git@github.com:me/site/").as_deref(), Some("site"));
     assert_eq!(name_for("https://github.com/me/---"), None);
 }
+
+#[test]
+fn unset_secrets_are_filled_as_compose_would() {
+    let dir = tempfile::tempdir().unwrap();
+    let compose = "services:\n  api:\n    build: .\n    ports: [\"8000:8000\"]\n    environment:\n      META_MODEL: ${META_MODEL:-muse-spark}\n      META_API_KEY: ${META_API_KEY:-}\n      CORS_ORIGINS: ${ALLOWED_ORIGINS:-https://a.example.com}\n      TOKEN: ${TOKEN}\n      SET: ${SET:-default}\n";
+    std::fs::write(dir.path().join("compose.yml"), compose).unwrap();
+    let survey = Survey::scan(dir.path()).unwrap();
+    let text = "name = \"api\"\n[[service]]\nname = \"api\"\nport = 8000\nbuild = { image = \"x\" }\nhealth = { tcp = true }\nsecrets = [\"META_MODEL\", \"META_API_KEY\", \"CORS_ORIGINS\", \"TOKEN\", \"SET\"]\n";
+    let lease = lease::Lease::parse(text).unwrap();
+    let canon = Arc::new(Canon::open_in_memory().unwrap());
+    let hush = Hush::new(canon, &Key::generate().unwrap());
+    // What `henry adopt` imported from the app's .env.
+    hush.set("api", "ALLOWED_ORIGINS", &Secret::new("https://b.example.com")).unwrap();
+    hush.set("api", "SET", &Secret::new("mine")).unwrap();
+
+    let filled = interpolate(&hush, "api", &lease, &survey).unwrap();
+    assert_eq!(filled, ["META_MODEL", "META_API_KEY", "CORS_ORIGINS"]);
+    let get = |n: &str| hush.get("api", n).unwrap().map(|s| s.expose().to_owned());
+    assert_eq!(get("META_MODEL").as_deref(), Some("muse-spark"));
+    assert_eq!(get("META_API_KEY").as_deref(), Some(""), "an empty default is still a value");
+    assert_eq!(get("CORS_ORIGINS").as_deref(), Some("https://b.example.com"), "the .env's value wins");
+    assert_eq!(get("SET").as_deref(), Some("mine"), "a value already set is kept");
+    assert_eq!(get("TOKEN"), None, "no default: it waits on you");
+}

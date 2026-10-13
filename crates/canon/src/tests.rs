@@ -430,3 +430,21 @@ fn events_after_returns_only_what_is_new() {
     assert_eq!(all, ["one", "two"]);
     assert_eq!(db.events_after(seen, Some("draw"), 10).unwrap().len(), 1);
 }
+
+#[test]
+fn an_adoption_remembers_the_record_its_cutover_replaced() {
+    let db = Canon::open_in_memory().unwrap();
+    assert!(db.adoption("odyssey").unwrap().is_none());
+    db.put_adoption("odyssey", Some("odyssey-data"), Some("odyssey-data")).unwrap();
+    db.set_seeded("odyssey", 42).unwrap();
+    let old = serde_json::json!({ "type": "CNAME", "content": "old.cfargotunnel.com" });
+    db.set_cutover("odyssey", Some(&old)).unwrap();
+    db.put_adoption("odyssey", Some("odyssey-data"), Some("odyssey-data")).unwrap();
+    let a = db.adoption("odyssey").unwrap().unwrap();
+    assert!(a.seeded_at.is_some() && a.cutover_at.is_some(), "adopting again keeps the cutover");
+    assert_eq!(a.dns, Some(old));
+    db.clear_cutover("odyssey").unwrap();
+    let a = db.adoption("odyssey").unwrap().unwrap();
+    assert_eq!((a.cutover_at, a.dns), (None, None));
+    assert_eq!(db.events(Some("odyssey"), 1).unwrap()[0].kind, "adopt.back");
+}

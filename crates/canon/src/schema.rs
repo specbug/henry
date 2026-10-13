@@ -182,6 +182,16 @@ const MIGRATIONS: &[&str] = &[
         at     INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX bench_by_model ON bench (model, id DESC);",
+    // 7: apps adopted from hostd, and their cutover.
+    "CREATE TABLE adoptions (
+        app           TEXT PRIMARY KEY,
+        source_volume TEXT,
+        volume        TEXT,
+        seeded_at     INTEGER,
+        cutover_at    INTEGER,
+        dns           TEXT,
+        created_at    INTEGER NOT NULL
+    ) STRICT;",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
