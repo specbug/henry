@@ -58,6 +58,7 @@ impl Home {
     }
 
     /// The master key, where no Keychain is available.
+    #[cfg(not(target_os = "macos"))]
     pub fn key_file(&self) -> PathBuf {
         self.root.join("master.key")
     }

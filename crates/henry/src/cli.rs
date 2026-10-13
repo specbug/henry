@@ -136,13 +136,19 @@ fn canon(home: &Home) -> Result<Canon> {
 }
 
 pub fn open_hush(home: &Home, canon: Arc<Canon>) -> Result<Hush> {
-    #[cfg(target_os = "macos")]
-    let store = hush::Keychain::default();
-    #[cfg(not(target_os = "macos"))]
-    let store = hush::FileKey { path: home.key_file() };
-    #[cfg(target_os = "macos")]
-    let _ = home;
-    Ok(Hush::open(canon, &store)?)
+    Ok(Hush::open(canon, &key_store(home))?)
+}
+
+/// On the Mac the master key lives in the login Keychain.
+#[cfg(target_os = "macos")]
+fn key_store(_home: &Home) -> impl hush::KeyStore {
+    hush::Keychain::default()
+}
+
+/// Elsewhere (Linux, CI) it lives in a file only you can read.
+#[cfg(not(target_os = "macos"))]
+fn key_store(home: &Home) -> impl hush::KeyStore {
+    hush::FileKey { path: home.key_file() }
 }
 
 fn read_lease(home: &Home, path: &std::path::Path) -> Result<(Result<Lease, Refusal>, String)> {
