@@ -1,166 +1,78 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository.
 
-## Project Overview
+Henry hosts GitHub repos on one Mac mini: it builds each app, proves it works,
+routes it through a Cloudflare Tunnel, backs it up to R2 and keeps it alive.
+The concept doc (shared separately) is the design of record. This repo is a
+rewrite; v1 lives only in git history before the rewrite commit.
 
-Henry is a security-first Rust daemon for managing home server functions on Mac Mini M4 Pro. It provides container management, Telegram bot control, HTTP API, media server integration (Jellyfin), AI integration (Claude), automated maintenance, reactive monitoring, and agentic task execution.
+## Names
 
-## Build and Development Commands
+Each part has a short name. Use the names in code, logs and docs; the UI uses
+plain words.
 
-```bash
-# Build
-cargo build              # Debug build
-cargo build --release    # Release build (14MB, LTO + stripped)
+| Name | Crate / module | Part |
+| --- | --- | --- |
+| Henry | `crates/henry` | the binary: CLI, daemon, launchd |
+| Canon | `crates/canon` | SQLite desired state |
+| Lease | `crates/lease` | `lease.toml` types, parser, policy |
+| Hush | `crates/hush` | sealed secrets |
+| Plumb | (milestone 2) | reconcile loop |
+| Hold | (milestone 2) | Podman VM + runtime trait |
+| Hinge | (milestone 3) | cloudflared + Caddy |
+| Proof | (milestone 4) | the Live gate |
+| Draft / Sound / Ghost | (milestone 5) | onboarding / AI-free scan / the AI |
+| Ark | (milestone 6) | backups |
+| Mend / Bench | (milestone 7) | upkeep / model eval |
+| Glass | (milestone 8) | web UI |
 
-# Test
-cargo test               # Run all tests (~153 tests)
-cargo test -p henry-config  # Test specific crate
+## Commands
 
-# Run
-./target/release/henry run              # Start with TUI
-./target/release/henry run --headless   # Start without TUI (for services)
-./target/release/henry status           # Check if daemon is running
-./target/release/henry check            # Validate configuration
-./target/release/henry init             # Generate config.toml
-./target/release/henry info             # Show version and features
-./target/release/henry install          # Install as macOS LaunchAgent
-./target/release/henry uninstall        # Uninstall LaunchAgent
-
-# Deploy apps
-./target/release/henry deploy https://github.com/user/repo --domain example.com --path /app
-./target/release/henry apps             # List deployed apps
-./target/release/henry logs myapp --service api  # Service-specific logs
-
-# With options
-./target/release/henry --config path/to/config.toml run
-./target/release/henry --verbose run    # Debug logging
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets     # CI denies warnings
+cargo fmt --all                            # rustfmt.toml: 120 columns
+cargo run -p henry -- check examples/lease.toml
+HENRY_HOME=/tmp/h cargo run -p henry -- run   # a throwaway home
 ```
 
-## Architecture
+## Rules the design depends on
 
-### Workspace Structure
+- **Ghost proposes, code decides.** AI output is only ever a proposal (a lease,
+  a Dockerfile, a diagnosis). It passes `Lease::parse` and then Proof. Never
+  let AI output mark anything live, open a port, or see a secret value.
+- **Crash-only.** Write the step to Canon before taking it. Jobs must be safe
+  to run twice: `Canon::requeue_interrupted` re-runs whatever was running when
+  the process died.
+- **Requests never go through Henry.** The proxy and tunnel are separate
+  processes so Henry can restart or replace itself without dropping traffic.
+- **Henry owns its checkouts.** Clone into `Home::checkouts()`; never touch
+  the user's working copies in `~/Documents` (macOS TCC blocks background
+  agents there anyway).
+- **Secrets.** Values exist only as `hush::Secret`, which never prints.
+  `Secret::expose` is the single way out; keep its call sites few and obvious.
+  Canon stores ciphertext bound to its `scope/name` slot.
+- **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
+  `deny_unknown_fields`. New capabilities get a field and a check, with a
+  stable violation `code` that Ghost can act on.
 
-The project is a Cargo workspace with 18 crates in `crates/`:
+## Conventions
 
-| Crate | Purpose |
-|-------|---------|
-| `henry-core` | Main binary, daemon loop, CLI (clap), signal handling, launchd integration |
-| `henry-config` | TOML configuration parsing, hot reload via notify |
-| `henry-lock` | Single-instance locking (port binding + PID file) |
-| `henry-secrets` | 1Password CLI (`op://`) secret resolution |
-| `henry-state` | SQLite persistence (sqlx) |
-| `henry-health` | System metrics via sysinfo |
-| `henry-tui` | Ratatui terminal interface |
-| `henry-telegram` | Telegram bot (Teloxide) with allowlist auth |
-| `henry-http` | Axum REST API with Bearer token auth, WebSocket events |
-| `henry-server` | Podman/Docker container management (bollard) |
-| `henry-media` | Jellyfin media server integration |
-| `henry-claude` | Anthropic API client + Claude Code session spawning |
-| `henry-maint` | Automated backups, log rotation, update checking |
-| `henry-reactive` | Observe→Decide→Execute control loop, anomaly detection |
-| `henry-agent` | ReAct pattern task execution with Claude planning |
-| `henry-proxy` | Caddy reverse proxy management, dynamic route configuration |
-| `henry-apps` | Multi-service app deployment from GitHub repos, Claude-powered repo analysis, Dockerfile generation |
-| `henry-tunnel` | Cloudflare Tunnel (cloudflared) management, DNS integration |
+- Canon migrations in `canon/src/schema.rs` are append-only. Never edit a
+  shipped entry.
+- Every crate keeps its tests next to it (`src/tests.rs` or inline). Prefer
+  tests that state a behaviour (`a_value_moved_to_another_slot_will_not_open`).
+- Error types: `thiserror` in libraries, `anyhow` in the binary.
+- Timestamps are Unix milliseconds (`canon::now_ms`); `henry::time::utc` prints them.
 
-### Key Design Patterns
+## Host facts worth knowing (from hostd)
 
-**Shared state via `Arc<RwLock<T>>`**: All managers are wrapped and passed to services:
-```rust
-let health: Arc<RwLock<HealthManager>> = Arc::new(RwLock::new(HealthManager::new(version)));
-let containers: Option<Arc<RwLock<ContainerManager>>> = ...;
-```
-
-**Graceful shutdown via broadcast channel**:
-```rust
-let (shutdown_tx, _) = broadcast::channel(1);
-let shutdown_rx = shutdown_tx.subscribe();
-tokio::spawn(async move {
-    service::run(..., shutdown_rx).await
-});
-// On shutdown:
-let _ = shutdown_tx.send(());
-```
-
-**Service function signature pattern** (all services follow this):
-```rust
-pub async fn run_server(
-    config: HttpConfig,
-    bind_addr: &str,
-    health: Arc<RwLock<HealthManager>>,
-    api_token: Option<String>,
-    containers: Option<Arc<RwLock<ContainerManager>>>,
-    media: Option<Arc<RwLock<MediaManager>>>,
-    claude: Option<Arc<RwLock<ClaudeManager>>>,
-    maint: Option<Arc<RwLock<MaintenanceManager>>>,
-    reactive: Option<Arc<RwLock<ReactiveEngine>>>,
-    agent: Option<Arc<RwLock<AgentEngine>>>,
-    event_tx: broadcast::Sender<WsEvent>,
-    mut shutdown: broadcast::Receiver<()>,
-) -> Result<(), HttpError>
-```
-
-**WebSocket event broadcasting**:
-```rust
-// Event bus created alongside shutdown channel
-let (shutdown_tx, _) = broadcast::channel(1);
-let (event_tx, _) = broadcast::channel::<henry_http::WsEvent>(256);
-
-// Broadcast events from anywhere
-let _ = event_tx.send(WsEvent::HealthUpdate { ... });
-```
-
-**Module registration in `daemon.rs`**:
-```rust
-let modules = [
-    ("server", config.containers.enabled),
-    ("media", config.media.enabled),
-    ("claude", config.claude.enabled),
-    // ... etc
-];
-```
-
-### Security Patterns
-
-- **Timing-safe comparison**: Use `subtle::ConstantTimeEq` for tokens/secrets
-- **File permissions**: 0o600 for files, 0o700 for directories
-- **Allowlist auth**: Telegram uses user ID/username allowlists, HTTP uses Bearer tokens
-- **Secret filtering**: Container inspect hides sensitive env vars
-- **Single-instance locking**: Port binding + PID file with stale detection
-
-### Signal Handling
-
-- `SIGTERM` / `SIGINT`: Graceful shutdown
-- `SIGUSR1` / `SIGHUP`: Configuration reload
-
-### Runtime Paths
-
-```
-~/.henry/
-├── config.toml      # Configuration
-├── henry.pid        # PID file
-├── state/henry.db   # SQLite state
-├── logs/            # Log files
-├── backups/         # Automated backups
-└── cache/           # Temporary cache
-```
-
-## Configuration
-
-Secrets use 1Password CLI references (`op://vault/item/field`). See `config.example.toml` for all options.
-
-Key sections: `[daemon]`, `[network]`, `[telegram]`, `[http]`, `[containers]`, `[media]`, `[claude]`, `[maint]`, `[reactive]`, `[agent]`, `[proxy]`, `[apps]`, `[tunnel]`
-
-## Adding New Modules
-
-When adding a new module/manager:
-
-1. Create crate in `crates/henry-<name>/`
-2. Add to workspace in root `Cargo.toml`
-3. Add config struct to `henry-config/src/lib.rs`
-4. Initialize in `henry-core/src/daemon.rs` (follow existing pattern)
-5. Add as dependency to `henry-http` and `henry-telegram`
-6. Add HTTP endpoints in `henry-http/src/lib.rs`
-7. Add Telegram commands in `henry-telegram/src/lib.rs`
-8. Update module registration arrays in `daemon.rs`
+- Only one process may start the Podman VM: two concurrent
+  `podman machine start` calls SIGTERM each other's gvproxy.
+- A failed `podman ps` does not mean "nothing is running". Retry before
+  believing it.
+- A build that starts milliseconds after a checkout can see stale files in the
+  VM; one retry is warranted before calling a commit broken.
+- FileVault is off and auto-login is on, so LaunchAgents start after a reboot
+  without anyone at the machine.

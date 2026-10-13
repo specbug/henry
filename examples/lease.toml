@@ -1,0 +1,38 @@
+# A lease: what an app may do on this Mac, and the rent it owes.
+# Check one with `henry check lease.toml`; register it with
+# `henry add lease.toml --repo https://github.com/you/app`.
+
+name = "draw"            # a-z, 0-9 and '-'. Becomes container and route names.
+branch = "main"          # the branch Henry deploys (default: main)
+auto_deploy = true       # deploy every push to it (default: true)
+
+[ai]
+model = "claude/claude-sonnet-5-5"   # optional; overrides Henry's default for this app
+
+[[service]]
+name = "api"
+port = 8100
+build = { dockerfile = "Dockerfile", context = "." }   # or { railpack = "." } or { image = "..." }
+health = { http = "/health" }                          # the rent: every service owes one
+public = { hostname = "draw.example.com" }             # omit to keep it private
+env = { LOG_LEVEL = "info" }                           # plain values only
+secrets = ["SESSION_KEY"]                              # names only; set with `henry secret set draw/SESSION_KEY`
+depends_on = ["db"]
+resources = { memory = "512MiB", cpus = 1.0 }
+
+[[service.volume]]
+name = "uploads"
+mount = "/data"
+backup = "sqlite:app.db"   # files | sqlite:<path> | postgres | redis
+
+[[service]]
+name = "db"
+port = 5432
+build = { image = "postgres:17" }
+health = { postgres = true }
+secrets = ["POSTGRES_PASSWORD"]
+
+[[service.volume]]
+name = "pg"
+mount = "/var/lib/postgresql/data"
+backup = "postgres"
