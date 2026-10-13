@@ -159,6 +159,13 @@ enum Cmd {
     Routes,
     /// Tell the running daemon to reread henry.toml and Henry's own secrets.
     Reload,
+    /// Open Glass, the web UI, signed in, in a browser on this Mac. From
+    /// elsewhere, Glass is at `[glass] hostname` behind Cloudflare Access.
+    Open {
+        /// Print the sign-in link instead of opening it.
+        #[arg(long)]
+        print: bool,
+    },
     /// Show where Henry keeps its files.
     Where,
 }
@@ -314,6 +321,21 @@ pub fn run(args: Args) -> Result<ExitCode> {
             }
             println!("asked Henry (pid {pid}) to reload");
         }
+        Cmd::Open { print } => {
+            let config = Config::load(&home.config())?;
+            home.ensure()?;
+            let token = home.ensure_glass_token()?;
+            let url = format!("http://{}/login?token={token}", config.http.listen);
+            if print || !cfg!(target_os = "macos") {
+                println!("{url}");
+                eprintln!("the link signs a browser on this Mac in to Glass; keep it to yourself");
+            } else {
+                let status = Command::new("open").arg(&url).status().context("running `open`")?;
+                if !status.success() {
+                    bail!("`open` failed; run `henry open --print` and paste the link");
+                }
+            }
+        }
         Cmd::Where => {
             println!("home       {}", home.root.display());
             println!("canon      {}", home.canon().display());
@@ -428,19 +450,10 @@ fn apps(home: &Home) -> Result<()> {
     Ok(())
 }
 
-/// The app name a repo URL suggests: its last path segment, made lease-safe.
-fn name_from_repo(repo: &str) -> Option<String> {
-    let last = repo.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next()?;
-    let name: String =
-        last.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let name = name.trim_matches('-');
-    (!name.is_empty()).then(|| name.chars().take(32).collect::<String>().trim_end_matches('-').to_owned())
-}
-
 fn onboard(home: &Home, repo: &str, name: Option<&str>, hostname: Option<&str>, branch: Option<&str>) -> Result<()> {
     let name = match name {
         Some(n) => n.to_owned(),
-        None => name_from_repo(repo).context("cannot tell the app's name from the URL; pass --name")?,
+        None => draft::name_for(repo).context("cannot tell the app's name from the URL; pass --name")?,
     };
     let canon = canon(home)?;
     draft::start(&canon, &name, repo, branch, hostname)?;
@@ -898,14 +911,6 @@ fn label(scope: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
-
-    use super::name_from_repo;
-
-    #[test]
-    fn a_repo_url_suggests_a_name() {
-        assert_eq!(name_from_repo("https://github.com/me/Draw_Board.git").as_deref(), Some("draw-board"));
-        assert_eq!(name_from_repo("git@github.com:me/site/").as_deref(), Some("site"));
-    }
 
     #[test]
     fn the_command_line_is_well_formed() {

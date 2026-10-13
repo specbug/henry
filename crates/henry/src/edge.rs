@@ -50,12 +50,21 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Henry's own public routes: the webhook path, when a hostname is set.
+/// Henry's own public routes: the webhook path, when a hostname is set, and
+/// Glass, when it is behind Cloudflare Access. Caddy marks every request on
+/// them as come from the edge.
 pub fn own_routes(config: &Config) -> Result<Vec<Route>> {
-    let Some(host) = &config.hinge.hooks_host else { return Ok(vec![]) };
-    let port: u16 =
-        config.http.listen.rsplit_once(':').and_then(|(_, p)| p.parse().ok()).context("[http] listen needs a port")?;
-    Ok(vec![Route { host: host.clone(), path: "/hooks".into(), upstream: port, owner: "henry".into() }])
+    let port = || -> Result<u16> {
+        config.http.listen.rsplit_once(':').and_then(|(_, p)| p.parse().ok()).context("[http] listen needs a port")
+    };
+    let mut routes = Vec::new();
+    if let Some(host) = &config.hinge.hooks_host {
+        routes.push(Route { host: host.clone(), path: "/hooks".into(), upstream: port()?, owner: hinge::HENRY.into() });
+    }
+    if let Some((host, _, _)) = config.glass.access()? {
+        routes.push(Route { host: host.to_owned(), path: "/".into(), upstream: port()?, owner: hinge::HENRY.into() });
+    }
+    Ok(routes)
 }
 
 pub fn hinge(config: &Config, canon: Arc<Canon>, hush: &Hush) -> Result<Hinge<Caddy, Cloudflare>> {
@@ -90,6 +99,18 @@ mod tests {
         config.http.listen = "127.0.0.1:7788".into();
         let r = own_routes(&config).unwrap();
         assert_eq!((r[0].host.as_str(), r[0].path.as_str(), r[0].upstream), ("hooks.example.com", "/hooks", 7788));
+    }
+
+    #[test]
+    fn glass_is_routed_only_behind_access() {
+        let mut config = Config::default();
+        config.glass.hostname = Some("henry.example.com".into());
+        let err = own_routes(&config).unwrap_err().to_string();
+        assert!(err.contains("Cloudflare Access"), "{err}");
+        config.glass.access_team = Some("acme".into());
+        config.glass.access_aud = Some("aud-tag".into());
+        let r = own_routes(&config).unwrap();
+        assert_eq!((r[0].host.as_str(), r[0].path.as_str(), r[0].owner.as_str()), ("henry.example.com", "/", "henry"));
     }
 
     #[test]

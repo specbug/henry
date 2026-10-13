@@ -1,8 +1,9 @@
 //! Henry's own HTTP endpoint, on loopback.
 //!
-//! For now it serves two things: `/healthz`, and `/hooks/github`, where
-//! GitHub reports pushes so a deploy starts within seconds rather than at the
-//! next poll. Hinge exposes the hook path through the tunnel. Every delivery
+//! It serves `/healthz`; `/hooks/github`, where GitHub reports pushes so a
+//! deploy starts within seconds rather than at the next poll; and Glass, the
+//! web UI, at `/` and `/api`. Hinge exposes the hook path through the tunnel,
+//! and Glass too when Cloudflare Access guards it. Every webhook delivery
 //! must carry a valid HMAC signature made with `henry/GITHUB_WEBHOOK_SECRET`;
 //! anything else is refused before its body is read as JSON.
 
@@ -21,6 +22,9 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 
+use crate::home::{Config, EngineConfig, Home};
+use crate::host::Host;
+
 pub const WEBHOOK_SECRET: &str = "GITHUB_WEBHOOK_SECRET";
 
 #[derive(Clone)]
@@ -29,15 +33,36 @@ struct Ctx {
     hush: Arc<Hush>,
 }
 
-pub async fn serve(listen: &str, canon: Arc<Canon>, hush: Arc<Hush>) -> Result<()> {
+pub async fn serve(listen: &str, canon: Arc<Canon>, hush: Arc<Hush>, glass: Router) -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/hooks/github", post(github))
-        .with_state(Ctx { canon, hush });
+        .with_state(Ctx { canon, hush })
+        .merge(glass);
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("listening on {listen}"))?;
     info!(%listen, "http endpoint up");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Glass, set up from config: its login token, and Cloudflare Access when
+/// it is public.
+pub fn glass(home: &Home, config: &Config, canon: Arc<Canon>, hush: Arc<Hush>) -> Result<Router> {
+    let token = home.ensure_glass_token()?;
+    let access = config.glass.access()?.map(|(_, team, aud)| glass::Access::new(team, aud));
+    let settings = glass::Settings { token, access, upkeep: config.mend.tasks(), backups: config.ark.is_some() };
+    Ok(glass::Glass::new(canon, hush, EngineLogs(config.engine.clone()), settings).router())
+}
+
+/// Logs straight from the engine. Connecting never starts the Podman machine.
+struct EngineLogs(EngineConfig);
+
+impl glass::Logs for EngineLogs {
+    async fn tail(&self, app: &str, lines: usize) -> Result<Vec<glass::Log>, String> {
+        let engine =
+            Host::from_config(&self.0).map_err(|e| format!("{e:#}"))?.connect().await.map_err(|e| format!("{e:#}"))?;
+        glass::tail_from(&engine, app, lines).await
+    }
 }
 
 async fn github(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> (StatusCode, String) {

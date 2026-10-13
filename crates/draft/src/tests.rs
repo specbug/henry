@@ -356,3 +356,10 @@ async fn a_model_that_never_proposes_spends_rounds_and_says_so() {
     assert_eq!(stage, DraftStage::Stuck);
     assert!(detail.as_deref().unwrap().ends_with("script ran out"), "the last reason is named: {detail:?}");
 }
+
+#[test]
+fn a_repo_url_suggests_a_name() {
+    assert_eq!(name_for("https://github.com/me/Draw_Board.git").as_deref(), Some("draw-board"));
+    assert_eq!(name_for("git@github.com:me/site/").as_deref(), Some("site"));
+    assert_eq!(name_for("https://github.com/me/---"), None);
+}

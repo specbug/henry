@@ -85,6 +85,15 @@ impl Default for Settings {
 pub use ghost::Planner;
 
 /// Begin onboarding a repo as `app`.
+/// The app name a repo URL suggests: its last path segment, made lease-safe.
+pub fn name_for(repo: &str) -> Option<String> {
+    let last = repo.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next()?;
+    let name: String =
+        last.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let name = name.trim_matches('-');
+    (!name.is_empty()).then(|| name.chars().take(32).collect::<String>().trim_end_matches('-').to_owned())
+}
+
 pub fn start(
     canon: &Canon,
     app: &str,

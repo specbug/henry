@@ -33,6 +33,9 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The owner of Henry's own routes.
+pub const HENRY: &str = "henry";
+
 /// One public route: requests for `host` under `path` go to `upstream`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Route {
@@ -135,7 +138,15 @@ impl<P: Proxy, T: Tunnel> Hinge<P, T> {
     pub async fn pass(&self) -> Result<Report> {
         let mut report = Report::default();
         let mut wanted = self.settings.own.clone();
-        wanted.extend(desired(&self.canon)?);
+        // An app may not claim a hostname Henry serves its own endpoints on.
+        let own: BTreeSet<&str> = self.settings.own.iter().map(|r| r.host.as_str()).collect();
+        for r in desired(&self.canon)? {
+            if own.contains(r.host.as_str()) {
+                warn!(app = %r.owner, host = %r.host, "not routed: the hostname is Henry's own");
+            } else {
+                wanted.push(r);
+            }
+        }
 
         // The gate: a route moves to a new upstream only once something is
         // listening there. Until then it stays where it was.

@@ -156,6 +156,32 @@ async fn a_route_waits_for_its_new_upstream_to_answer() {
     drop(listener);
 }
 
+#[tokio::test]
+async fn an_app_cannot_take_a_hostname_henry_serves_itself() {
+    let canon = Arc::new(Canon::open_in_memory().unwrap());
+    let text = LEASE.replace("draw.example.com", "hooks.example.com");
+    canon.insert_app(&Lease::parse(&text).unwrap(), &text, "repo", Source::Operator).unwrap();
+    let r = canon.create_release("draw", "sha", &text).unwrap();
+    canon.set_release_state(r.id, ReleaseState::Live, None).unwrap();
+    canon.port_for("draw", "web", r.id, 40000..41000).unwrap();
+    canon.port_for("draw", "api", r.id, 40000..41000).unwrap();
+    let proxy = Arc::new(FakeProxy::default());
+    let hinge = Hinge::new(canon, proxy.clone(), None::<Arc<FakeTunnel>>, settings());
+    hinge.pass().await.unwrap();
+    let applied = proxy.applied.lock().unwrap()[0].clone();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].owner, "henry");
+}
+
+#[test]
+fn caddy_marks_requests_to_henrys_own_routes() {
+    let caddy = Caddy::new("http://127.0.0.1:2019", "127.0.0.1:8080");
+    let own = Route { host: "henry.example.com".into(), path: "/".into(), upstream: 7777, owner: HENRY.into() };
+    let c = caddy.config(&[own]);
+    let proxy = &c["apps"]["http"]["servers"]["henry"]["routes"][0]["handle"][0];
+    assert_eq!(proxy["headers"]["request"]["set"][caddy::EDGE_HEADER], json!(["edge"]));
+}
+
 // --- Caddy ---------------------------------------------------------------------
 
 #[test]
@@ -173,6 +199,7 @@ fn caddy_config_routes_longer_paths_first() {
     assert_eq!(r[0]["match"][0]["path"], json!(["/api", "/api/*"]));
     assert_eq!(r[0]["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:20001");
     assert!(r[1]["match"][0].get("path").is_none(), "`/` matches the whole host");
+    assert!(r[0]["handle"][0].get("headers").is_none(), "an app's requests are not marked");
     assert_eq!(r[2]["handle"][0]["status_code"], 404, "everything else is a 404");
     assert!(r[2].get("match").is_none());
     assert_eq!(c["admin"]["listen"], "127.0.0.1:2019");
@@ -185,6 +212,10 @@ struct CaddyState {
 }
 
 async fn mock_caddy() -> (String, Arc<CaddyState>) {
+    mock_caddy_on(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()).await
+}
+
+async fn mock_caddy_on(listener: tokio::net::TcpListener) -> (String, Arc<CaddyState>) {
     let state = Arc::new(CaddyState::default());
     let app = Router::new()
         .route(
@@ -199,10 +230,31 @@ async fn mock_caddy() -> (String, Arc<CaddyState>) {
             }),
         )
         .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), state)
+}
+
+#[tokio::test]
+async fn caddy_is_waited_for_while_its_admin_endpoint_restarts() {
+    // A port nothing listens on yet, the way Caddy's admin port is for a
+    // moment after each load.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let late = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        mock_caddy_on(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap()).await
+    });
+    let caddy = Caddy::new(format!("http://127.0.0.1:{port}"), "127.0.0.1:8080");
+    assert!(caddy.apply(&[]).await.unwrap());
+    let (_, state) = late.await.unwrap();
+    assert_eq!(*state.loads.lock().unwrap(), 1);
+
+    // Nothing ever answering is still an error, soon.
+    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let started = std::time::Instant::now();
+    let err = Caddy::new(format!("http://127.0.0.1:{gone}"), "127.0.0.1:8080").apply(&[]).await.unwrap_err();
+    assert!(matches!(err, Error::Unreachable("Caddy", _)), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[tokio::test]

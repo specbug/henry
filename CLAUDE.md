@@ -29,11 +29,12 @@ plain words.
 | Ark | `crates/ark` | backups: `restic.rs` (CLI, secrets in env), `engine.rs` (helper containers, scripts), drills; `henry/src/backup.rs` builds it |
 | Mend | `crates/mend` | upkeep: `disk.rs`, `host.rs`, `tools.rs` (owned binaries); `henry/src/upkeep.rs` runs each task and the tool gate |
 | Bench | `crates/bench` | the model eval: `cases.rs` repos with traps, scored by `faults` |
-| Glass | (milestone 9) | web UI |
+| Glass | `crates/glass` | web UI: JSON API under `/api`, page and faces built in (`assets/`), `access.rs` (Cloudflare Access JWTs), `strip.rs` (30-day health); `henry/src/http.rs` mounts it |
 
 The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, Draft's pass, Ark's and Mend's schedules,
 then Hinge on a tick, and three side tasks: the job worker (Press, Draft, Ark and Mend jobs; a
-Mend job's `app` is its task), Press's poll, and the loopback HTTP endpoint (`henry/src/http.rs`).
+Mend job's `app` is its task), Press's poll, and the loopback HTTP endpoint (`henry/src/http.rs`:
+the webhook and Glass).
 
 ## Commands
 
@@ -122,6 +123,14 @@ the engine tests real.
   anything needing sudo is yours.
 - **Bench never lets a model judge.** Scores come from `bench::faults` over a
   checked lease; Henry recommends a model, it never switches by itself.
+- **Glass asks, the daemon does.** Glass's actions are the CLI's requests
+  (queue a job, set desired, seal a secret); it never shows a secret value
+  and never marks anything live. Its events say who asked.
+- **Loopback is not trust.** Glass on the Mac needs the `glass.token`
+  cookie (`henry open`); through the edge, a valid Cloudflare Access JWT.
+  Caddy sets `X-Henry-Via: edge` on Henry's own routes, replacing any the
+  client sent; without `[glass]` Access settings Glass is never routed.
+  An app may not claim a hostname Henry serves itself.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.

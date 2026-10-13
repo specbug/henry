@@ -105,6 +105,37 @@ impl Home {
     pub fn tunnel_token(&self) -> PathBuf {
         self.root.join("tunnel.token")
     }
+
+    /// Glass's login token, for browsers on the Mac. Mode 0600.
+    pub fn glass_token(&self) -> PathBuf {
+        self.root.join("glass.token")
+    }
+
+    /// Glass's login token, made the first time it is asked for. Delete the
+    /// file and restart Henry to sign every browser out.
+    pub fn ensure_glass_token(&self) -> Result<String> {
+        let path = self.glass_token();
+        if let Ok(t) = std::fs::read_to_string(&path)
+            && t.trim().len() >= 32
+        {
+            return Ok(t.trim().to_owned());
+        }
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no randomness for Glass's token: {e}"))?;
+        let token = hex::encode(bytes);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        use std::io::Write as _;
+        opts.open(&path)
+            .and_then(|mut f| f.write_all(token.as_bytes()))
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(token)
+    }
 }
 
 /// `henry.toml`. Every field has a default, so the file is optional.
@@ -123,6 +154,34 @@ pub struct Config {
     pub mend: MendConfig,
     /// Unset: no tunnel, and Caddy serves on loopback only.
     pub cloudflare: Option<CloudflareConfig>,
+    pub glass: GlassConfig,
+}
+
+/// Glass, the web UI. It always answers on Henry's loopback port; with all
+/// three of these set it is also public, behind Cloudflare Access.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GlassConfig {
+    /// The public hostname, e.g. `henry.example.com`.
+    pub hostname: Option<String>,
+    /// The Zero Trust team name, e.g. `acme` for `acme.cloudflareaccess.com`.
+    pub access_team: Option<String>,
+    /// The Access application's AUD tag.
+    pub access_aud: Option<String>,
+}
+
+impl GlassConfig {
+    /// The Access check, when Glass is public. A hostname without Access is
+    /// refused: Glass is never public on its own.
+    pub fn access(&self) -> Result<Option<(&str, &str, &str)>> {
+        match (&self.hostname, &self.access_team, &self.access_aud) {
+            (None, None, None) => Ok(None),
+            (Some(h), Some(t), Some(a)) if !h.is_empty() && !t.is_empty() && !a.is_empty() => Ok(Some((h, t, a))),
+            _ => anyhow::bail!(
+                "[glass] needs hostname, access_team and access_aud together: Glass is public only behind Cloudflare Access"
+            ),
+        }
+    }
 }
 
 /// Caddy, the proxy every request passes through on the Mac.

@@ -13,6 +13,10 @@ use crate::{Error, Proxy, Result, Route};
 
 /// The header on Caddy's catch-all 404.
 pub const NO_ROUTE_HEADER: &str = "X-Henry-Route";
+/// The header Caddy sets on every request it sends to Henry's own routes,
+/// replacing any the client sent, so Henry knows the request came from the
+/// edge and holds it to the edge's rules.
+pub const EDGE_HEADER: &str = "X-Henry-Via";
 
 pub struct Caddy {
     /// The admin endpoint, e.g. `http://127.0.0.1:2019`.
@@ -46,14 +50,14 @@ impl Caddy {
                     let base = r.path.trim_end_matches('/');
                     matcher["path"] = json!([base, format!("{base}/*")]);
                 }
-                json!({
-                    "match": [matcher],
-                    "handle": [{
-                        "handler": "reverse_proxy",
-                        "upstreams": [{ "dial": format!("127.0.0.1:{}", r.upstream) }],
-                    }],
-                    "terminal": true,
-                })
+                let mut proxy = json!({
+                    "handler": "reverse_proxy",
+                    "upstreams": [{ "dial": format!("127.0.0.1:{}", r.upstream) }],
+                });
+                if r.owner == crate::HENRY {
+                    proxy["headers"] = json!({ "request": { "set": { EDGE_HEADER: ["edge"] } } });
+                }
+                json!({ "match": [matcher], "handle": [proxy], "terminal": true })
             })
             .collect();
         // Anything no route claims gets a 404, not Caddy's empty 200, marked
@@ -76,29 +80,43 @@ impl Caddy {
     }
 }
 
+/// How long a refused connection is retried. Caddy restarts its admin
+/// endpoint after every load, and a request in that gap is refused.
+const ADMIN_RESTART: Duration = Duration::from_millis(1500);
+
+impl Caddy {
+    async fn send(&self, req: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let deadline = tokio::time::Instant::now() + ADMIN_RESTART;
+        loop {
+            match req().send().await {
+                Err(e) if e.is_connect() && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                other => return other.map_err(|e| Error::Unreachable("Caddy", e.to_string())),
+            }
+        }
+    }
+}
+
 impl Proxy for Caddy {
     async fn apply(&self, routes: &[Route]) -> Result<bool> {
         let want = self.config(routes);
-        let current = self
-            .client
-            .get(format!("{}/config/", self.admin))
-            .send()
-            .await
-            .map_err(|e| Error::Unreachable("Caddy", e.to_string()))?;
+        let current = self.send(|| self.client.get(format!("{}/config/", self.admin))).await?;
         if current.status().is_success() {
             let have: Value = current.json().await.unwrap_or(Value::Null);
             if have == want {
                 return Ok(false);
             }
         }
+        let body = serde_json::to_vec(&want).expect("a config always serializes");
         let loaded = self
-            .client
-            .post(format!("{}/load", self.admin))
-            .header("content-type", "application/json")
-            .body(serde_json::to_vec(&want).expect("a config always serializes"))
-            .send()
-            .await
-            .map_err(|e| Error::Unreachable("Caddy", e.to_string()))?;
+            .send(|| {
+                self.client
+                    .post(format!("{}/load", self.admin))
+                    .header("content-type", "application/json")
+                    .body(body.clone())
+            })
+            .await?;
         if !loaded.status().is_success() {
             let body = loaded.text().await.unwrap_or_default();
             return Err(Error::Refused("Caddy", body));
