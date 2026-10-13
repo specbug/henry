@@ -1,0 +1,19 @@
+[package]
+name = "plumb"
+description = "The reconcile loop: brings what runs back to true with what Canon says should"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canon.workspace = true
+hold.workspace = true
+hush.workspace = true
+lease.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

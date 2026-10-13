@@ -71,6 +71,15 @@ const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (scope, name)
     ) STRICT;",
+    // 2: host ports Plumb publishes containers on, for Hinge to route to.
+    // `slot` is the release id for a stateless service, 0 for a stateful one.
+    "CREATE TABLE ports (
+        app       TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+        service   TEXT NOT NULL,
+        slot      INTEGER NOT NULL,
+        host_port INTEGER NOT NULL UNIQUE,
+        PRIMARY KEY (app, service, slot)
+    ) STRICT;",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

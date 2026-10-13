@@ -18,8 +18,8 @@ plain words.
 | Canon | `crates/canon` | SQLite desired state |
 | Lease | `crates/lease` | `lease.toml` types, parser, policy |
 | Hush | `crates/hush` | sealed secrets |
-| Plumb | (milestone 2) | reconcile loop |
-| Hold | (milestone 2) | Podman VM + runtime trait |
+| Plumb | `crates/plumb` | reconcile loop (`plan.rs` is pure; `lib.rs` acts) |
+| Hold | `crates/hold` | `Runtime` + `Machine` traits, `Engine` (Docker API), `fake::Fake` |
 | Hinge | (milestone 3) | cloudflared + Caddy |
 | Proof | (milestone 4) | the Live gate |
 | Draft / Sound / Ghost | (milestone 5) | onboarding / AI-free scan / the AI |
@@ -35,7 +35,11 @@ cargo clippy --workspace --all-targets     # CI denies warnings
 cargo fmt --all                            # rustfmt.toml: 120 columns
 cargo run -p henry -- check examples/lease.toml
 HENRY_HOME=/tmp/h cargo run -p henry -- run   # a throwaway home
+HENRY_ENGINE_TESTS=1 cargo test --workspace   # also run against a real Docker/Podman socket
 ```
+
+In a cloud session with no engine running, `dockerd &` usually works and makes
+the engine tests real.
 
 ## Rules the design depends on
 
@@ -53,6 +57,12 @@ HENRY_HOME=/tmp/h cargo run -p henry -- run   # a throwaway home
 - **Secrets.** Values exist only as `hush::Secret`, which never prints.
   `Secret::expose` is the single way out; keep its call sites few and obvious.
   Canon stores ciphertext bound to its `scope/name` slot.
+- **Only the daemon starts the Podman machine.** CLI commands connect with
+  `Host::connect`, which never starts anything.
+- **A failed observation is not an empty one.** If `Runtime::list` fails, a pass
+  must act on nothing. Plumb retries once, then skips.
+- **A stateful service runs once.** Services with volumes get one container
+  (`<app>-<service>`) replaced in place; never two against one volume.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.

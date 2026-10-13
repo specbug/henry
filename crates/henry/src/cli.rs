@@ -6,12 +6,14 @@ use std::process::{Command, ExitCode};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use canon::{Canon, Desired, Source};
+use canon::{Canon, Desired, ReleaseState, Source, serde_json};
 use clap::{Parser, Subcommand};
+use hold::Runtime;
 use hush::{HOST, Hush, Secret};
 use lease::{Lease, Refusal};
 
 use crate::home::{Config, Home};
+use crate::host::Host;
 use crate::time::utc;
 use crate::{daemon, launchd};
 
@@ -42,6 +44,17 @@ enum Cmd {
     Apps,
     /// One app in detail: routes, secrets, releases and recent events.
     Show { app: String },
+    /// What the container engine is running for each app.
+    Ps,
+    /// Try a release made of images that already exist. Plumb runs it beside
+    /// the live release; only Proof can make it live.
+    Trial {
+        app: String,
+        /// A prebuilt image for a service that would otherwise need a build,
+        /// as SERVICE=IMAGE. Repeat for several services.
+        #[arg(long = "image", value_name = "SERVICE=IMAGE")]
+        images: Vec<String>,
+    },
     /// Recent events, for one app or for everything.
     Events {
         app: Option<String>,
@@ -86,6 +99,12 @@ enum SecretCmd {
     Rm { secret: String },
 }
 
+impl Args {
+    pub fn is_daemon(&self) -> bool {
+        matches!(self.cmd, Cmd::Run)
+    }
+}
+
 pub fn run(args: Args) -> Result<ExitCode> {
     let home = Home::locate()?;
     match args.cmd {
@@ -95,6 +114,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
         Cmd::Apps => apps(&home)?,
         Cmd::Show { app } => show(&home, &app)?,
         Cmd::Events { app, limit } => events(&home, app.as_deref(), limit)?,
+        Cmd::Ps => ps(&home)?,
+        Cmd::Trial { app, images } => trial(&home, &app, &images)?,
         Cmd::Start { app } => canon(&home)?.set_desired(&app, Desired::Running)?,
         Cmd::Stop { app } => canon(&home)?.set_desired(&app, Desired::Stopped)?,
         Cmd::Remove { app, yes } => {
@@ -267,6 +288,67 @@ fn show(home: &Home, name: &str) -> Result<()> {
     for e in canon.events(Some(&app.name), 10)? {
         println!("    {}  {}", utc(e.at), e.message);
     }
+    Ok(())
+}
+
+fn ps(home: &Home) -> Result<()> {
+    let config = Config::load(&home.config())?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let containers = rt.block_on(async {
+        let engine = Host::from_config(&config.engine)?.connect().await?;
+        anyhow::Ok(engine.list().await?)
+    })?;
+    if containers.is_empty() {
+        println!("no containers yet");
+        return Ok(());
+    }
+    println!("{:<28} {:<10} {:<10} RELEASE", "CONTAINER", "STATE", "ROLE");
+    for (_, list) in plumb::by_app(&containers) {
+        for c in list {
+            let state = format!("{:?}", c.state).to_lowercase();
+            let role = c.label(hold::label::ROLE).unwrap_or("-");
+            let release = c.label(hold::label::RELEASE).unwrap_or("-");
+            println!("{:<28} {:<10} {:<10} {release}", c.name, state, role);
+        }
+    }
+    Ok(())
+}
+
+fn trial(home: &Home, name: &str, overrides: &[String]) -> Result<()> {
+    let canon = canon(home)?;
+    let app = canon.app(name)?;
+    let lease = app.lease()?;
+    let mut images = serde_json::Map::new();
+    for o in overrides {
+        let (service, image) = o.split_once('=').context("write --image as SERVICE=IMAGE")?;
+        if lease.service(service).is_none() {
+            bail!("`{name}` has no service `{service}`");
+        }
+        images.insert(service.to_owned(), image.into());
+    }
+    let mut unbuilt = Vec::new();
+    for s in &lease.services {
+        if images.contains_key(&s.name) {
+            continue;
+        }
+        match &s.build {
+            lease::Build::Image(image) => {
+                images.insert(s.name.clone(), image.clone().into());
+            }
+            _ => unbuilt.push(s.name.as_str()),
+        }
+    }
+    if !unbuilt.is_empty() {
+        bail!(
+            "{} need(s) a build. Pass a prebuilt image with --image {}=<ref>; Henry builds from source once Draft lands",
+            unbuilt.join(", "),
+            unbuilt[0]
+        );
+    }
+    let release = canon.create_release(name, "images", &app.lease)?;
+    canon.set_release_images(release.id, &serde_json::Value::Object(images))?;
+    canon.set_release_state(release.id, ReleaseState::Trial, Some("tried by hand from existing images"))?;
+    println!("release {} is on trial; Plumb starts it on its next pass", release.id);
     Ok(())
 }
 

@@ -202,3 +202,67 @@ fn snapshots_are_complete_copies() {
     let restored = Canon::open(&copy).unwrap();
     assert_eq!(restored.app("draw").unwrap().name, "draw");
 }
+
+#[test]
+fn wanted_releases_are_live_plus_the_newest_trial() {
+    let db = db_with("draw", "draw.example.com");
+    assert_eq!(db.wanted_releases("draw").unwrap(), Wanted::default());
+
+    let a = db.create_release("draw", "a", "c").unwrap();
+    db.set_release_state(a.id, ReleaseState::Trial, None).unwrap();
+    let w = db.wanted_releases("draw").unwrap();
+    assert_eq!((w.live, w.candidate.map(|r| r.id)), (None, Some(a.id)));
+
+    db.set_release_state(a.id, ReleaseState::Live, None).unwrap();
+    let b = db.create_release("draw", "b", "c").unwrap();
+    db.set_release_state(b.id, ReleaseState::Building, None).unwrap();
+    let w = db.wanted_releases("draw").unwrap();
+    assert_eq!(w.live.map(|r| r.id), Some(a.id));
+    assert_eq!(w.candidate, None, "a release still building has nothing to run");
+
+    db.set_release_state(b.id, ReleaseState::Trial, None).unwrap();
+    let c = db.create_release("draw", "c", "c").unwrap();
+    db.set_release_state(c.id, ReleaseState::Proof, None).unwrap();
+    assert_eq!(db.wanted_releases("draw").unwrap().candidate.map(|r| r.id), Some(c.id), "only the newest is tried");
+
+    db.set_release_state(c.id, ReleaseState::Failed, Some("soak")).unwrap();
+    assert_eq!(db.wanted_releases("draw").unwrap().candidate.map(|r| r.id), Some(b.id));
+}
+
+#[test]
+fn ports_are_stable_unique_and_freed() {
+    let db = db_with("draw", "draw.example.com");
+    let (c, t) = lease_without_route("odyssey");
+    db.insert_app(&c, &t, "r", Source::Operator).unwrap();
+
+    let a = db.port_for("draw", "api", 1, 20000..20003).unwrap();
+    assert_eq!(a, 20000);
+    assert_eq!(db.port_for("draw", "api", 1, 20000..20003).unwrap(), a, "same slot, same port");
+    assert_eq!(db.port_for("draw", "api", 2, 20000..20003).unwrap(), 20001);
+    assert_eq!(db.port_for("odyssey", "web", 0, 20000..20003).unwrap(), 20002);
+    assert!(matches!(db.port_for("draw", "api", 3, 20000..20003), Err(Error::PortsExhausted)));
+
+    assert_eq!(db.free_ports("draw", &[("api".into(), 2)]).unwrap(), 1);
+    assert_eq!(db.port_for("draw", "api", 3, 20000..20003).unwrap(), 20000, "a freed port is reused");
+
+    db.remove_app("odyssey").unwrap();
+    assert_eq!(db.port_for("draw", "worker", 0, 20000..20003).unwrap(), 20002, "removal frees an app's ports");
+}
+
+#[test]
+fn secret_versions_move_when_set_again() {
+    let db = Canon::open_in_memory().unwrap();
+    db.put_sealed("a", "K", b"1").unwrap();
+    let first = db.sealed_versions("a").unwrap()["K"];
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    db.put_sealed("a", "K", b"2").unwrap();
+    assert!(db.sealed_versions("a").unwrap()["K"] > first);
+    assert!(db.sealed_versions("b").unwrap().is_empty());
+}
+
+fn lease_without_route(name: &str) -> (Lease, String) {
+    let text = format!(
+        "name = \"{name}\"\n[[service]]\nname = \"web\"\nport = 80\nbuild = {{ image = \"x\" }}\nhealth = {{ tcp = true }}\n"
+    );
+    (Lease::parse(&text).unwrap(), text)
+}
