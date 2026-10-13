@@ -1,109 +1,35 @@
 [workspace]
-resolver = "2"
-members = [
-    "crates/henry-core",
-    "crates/henry-config",
-    "crates/henry-lock",
-    "crates/henry-secrets",
-    "crates/henry-state",
-    "crates/henry-tui",
-    "crates/henry-health",
-    "crates/henry-telegram",
-    "crates/henry-http",
-    "crates/henry-server",
-    "crates/henry-media",
-    "crates/henry-claude",
-    "crates/henry-maint",
-    "crates/henry-reactive",
-    "crates/henry-agent",
-    "crates/henry-proxy",
-    "crates/henry-apps",
-    "crates/henry-tunnel",
-]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["legacy"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-authors = ["Rishit Vora"]
+edition = "2024"
 license = "MIT"
-repository = "https://github.com/rishitv/henry"
+repository = "https://github.com/specbug/henry"
+rust-version = "1.89"
 
 [workspace.dependencies]
-# Core
-tokio = { version = "1", features = ["full"] }
+lease = { path = "crates/lease" }
+hush = { path = "crates/hush" }
+canon = { path = "crates/canon" }
+
+anyhow = "1"
+chacha20poly1305 = "0.10"
+clap = { version = "4.5", features = ["derive", "env"] }
+getrandom = "0.3"
+hex = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "2"
-anyhow = "1"
-
-# Database
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
-
-# Security
-subtle = "2"
-
-# Telegram
-teloxide = { version = "0.13", features = ["macros"] }
-
-# HTTP
-axum = { version = "0.8", features = ["ws"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-http = "1"
-
-# Containers
-bollard = "0.18"
-
-# HTTP client
-reqwest = { version = "0.12", features = ["json"] }
-
-# Process utilities
-which = "7"
-
-# UUID generation
-uuid = { version = "1", features = ["v4"] }
-
-# JSON serialization
-serde_json = "1"
-
-# UI
-ratatui = "0.29"
-crossterm = "0.28"
-
-# Async utilities
-tokio-util = "0.7"
-futures = "0.3"
-
-# Time
-chrono = { version = "0.4", features = ["serde"] }
-
-# File watching
-notify = "7"
-
-# Workspace crates
-henry-core = { path = "crates/henry-core" }
-henry-config = { path = "crates/henry-config" }
-henry-lock = { path = "crates/henry-lock" }
-henry-secrets = { path = "crates/henry-secrets" }
-henry-state = { path = "crates/henry-state" }
-henry-tui = { path = "crates/henry-tui" }
-henry-health = { path = "crates/henry-health" }
-henry-telegram = { path = "crates/henry-telegram" }
-henry-http = { path = "crates/henry-http" }
-henry-server = { path = "crates/henry-server" }
-henry-media = { path = "crates/henry-media" }
-henry-claude = { path = "crates/henry-claude" }
-henry-maint = { path = "crates/henry-maint" }
-henry-reactive = { path = "crates/henry-reactive" }
-henry-agent = { path = "crates/henry-agent" }
-henry-proxy = { path = "crates/henry-proxy" }
-henry-apps = { path = "crates/henry-apps" }
-henry-tunnel = { path = "crates/henry-tunnel" }
-
-# Cron parsing
-cron = "0.15"
+zeroize = "1"
 
 [profile.release]
 lto = true
