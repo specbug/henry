@@ -107,6 +107,8 @@ pub struct Config {
     pub http: HttpConfig,
     pub hinge: HingeConfig,
     pub proof: ProofConfig,
+    /// Unset: no backups.
+    pub ark: Option<ArkConfig>,
     /// Unset: no tunnel, and Caddy serves on loopback only.
     pub cloudflare: Option<CloudflareConfig>,
 }
@@ -239,6 +241,49 @@ impl ProofConfig {
         s.signatures.extend(self.signatures.iter().cloned());
         s
     }
+}
+
+/// Backups. Secrets: `henry/RESTIC_PASSWORD` (keep a copy; without it the
+/// backups cannot be read), and for R2 `henry/R2_ACCESS_KEY_ID` and
+/// `henry/R2_SECRET_ACCESS_KEY`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArkConfig {
+    /// A restic repository, e.g.
+    /// `s3:https://<account>.r2.cloudflarestorage.com/<bucket>/henry`.
+    pub repository: String,
+    /// More repositories that get a copy every day, e.g. `rclone:gdrive:henry`.
+    #[serde(default)]
+    pub mirrors: Vec<String>,
+    /// The `restic` binary. Unset: found on PATH or in Homebrew's bin.
+    #[serde(default)]
+    pub restic: Option<std::path::PathBuf>,
+    #[serde(default = "ark_every_hours")]
+    pub every_hours: u64,
+    #[serde(default = "ark_drill_days")]
+    pub drill_every_days: u64,
+    #[serde(default = "ark_daily")]
+    pub keep_daily: u32,
+    #[serde(default = "ark_weekly")]
+    pub keep_weekly: u32,
+    #[serde(default = "ark_monthly")]
+    pub keep_monthly: u32,
+}
+
+fn ark_every_hours() -> u64 {
+    24
+}
+fn ark_drill_days() -> u64 {
+    30
+}
+fn ark_daily() -> u32 {
+    7
+}
+fn ark_weekly() -> u32 {
+    4
+}
+fn ark_monthly() -> u32 {
+    6
 }
 
 /// Henry's own HTTP endpoint. Loopback only: Hinge exposes the webhook path.

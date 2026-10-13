@@ -361,3 +361,21 @@ fn overlays_are_replaced_whole_and_go_with_the_app() {
     db.remove_app("draw").unwrap();
     assert!(db.overlays("draw").unwrap().is_empty());
 }
+
+#[test]
+fn backups_and_drills_remember_the_last_good_one() {
+    let db = Canon::open_in_memory().unwrap();
+    db.record_backup("draw", "db/pg", Some("aaaa1111"), Some(100), None).unwrap();
+    db.record_backup("draw", "db/pg", None, None, Some("pg_dumpall: connection refused")).unwrap();
+    assert_eq!(db.last_good_backup("draw", "db/pg").unwrap().unwrap().snapshot.as_deref(), Some("aaaa1111"));
+    assert!(db.last_good_backup("draw", "web/data").unwrap().is_none());
+    assert_eq!(db.backups("draw", 10).unwrap().len(), 2);
+    let failed = db.events(Some("draw"), 5).unwrap();
+    assert_eq!(failed.len(), 1, "only the failure is an event");
+    assert!(failed[0].message.contains("connection refused"));
+
+    db.record_drill("draw", "db/pg", "aaaa1111", true, "3 databases").unwrap();
+    db.record_drill("draw", "db/pg", "bbbb2222", false, "psql exited 2").unwrap();
+    assert!(!db.last_drill("draw", "db/pg").unwrap().unwrap().ok);
+    assert_eq!(db.last_good_drill("draw", "db/pg").unwrap().unwrap().snapshot, "aaaa1111");
+}

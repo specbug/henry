@@ -78,6 +78,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "ark"
+version = "0.1.0"
+dependencies = [
+ "canon",
+ "getrandom 0.3.4",
+ "hex",
+ "hush",
+ "lease",
+ "plumb",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -632,6 +649,7 @@ name = "henry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark",
  "axum",
  "canon",
  "clap",
@@ -655,6 +673,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

@@ -26,13 +26,13 @@ plain words.
 | Sound | `crates/sound` | the AI-free repo scan, its skeleton plan, and `Plan::check` |
 | Ghost | `crates/ghost` | provider adapters (`openai.rs` for Meta/Gemini/OpenAI, `claude.rs`), the tool loop (`propose.rs`) |
 | Draft | `crates/draft` | onboarding rounds: a Canon job (`run`) and a tick (`pass`); `henry/src/ai.rs` picks the model |
-| Ark | (milestone 7) | backups |
+| Ark | `crates/ark` | backups: `restic.rs` (CLI, secrets in env), `engine.rs` (helper containers, scripts), drills; `henry/src/backup.rs` builds it |
 | Mend / Bench | (milestone 8) | upkeep / model eval |
 | Glass | (milestone 9) | web UI |
 
-The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, Draft's pass, then Hinge on a tick, and
-three side tasks: the job worker (Press and Draft jobs), Press's poll, and the loopback HTTP
-endpoint (`henry/src/http.rs`).
+The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, Draft's pass, Ark's schedule, then Hinge
+on a tick, and three side tasks: the job worker (Press, Draft and Ark jobs), Press's poll, and
+the loopback HTTP endpoint (`henry/src/http.rs`).
 
 ## Commands
 
@@ -44,6 +44,7 @@ cargo run -p henry -- check examples/lease.toml
 HENRY_HOME=/tmp/h cargo run -p henry -- run   # a throwaway home
 HENRY_ENGINE_TESTS=1 cargo test --workspace   # also run against a real Docker/Podman socket
 HENRY_CADDY=/path/to/caddy cargo test -p hinge   # Hinge against a real Caddy
+HENRY_ENGINE_TESTS=1 HENRY_RESTIC=/path/to/restic cargo test -p ark   # Ark: real backups, drills, restores
 ```
 
 In a cloud session with no engine running, `dockerd &` usually works and makes
@@ -101,6 +102,17 @@ the engine tests real.
   initialised with it); a templated one is remade from its parts each round.
 - **An image tag names its recipe.** `henry/<app>-<svc>:<sha12>-<hash>` hashes
   the build recipe and overlays, so one commit built two ways is two images.
+- **A backup counts once restored.** Ark drills each target into a scratch
+  volume (and server) after its first backup and monthly; `henry backups`
+  says "not yet proven restorable" until one passes.
+- **Ark never overwrites a volume in use.** `Ark::restore` refuses while any
+  container mounts it. Scratch names are `henry-drill-<app>-<service>`.
+- **Backup failures are recorded, not retried hot.** A target whose last
+  attempt failed waits `retry` (1h) before the schedule queues it again.
+- **Nothing stays paused.** Files backups pause a volume's users and always
+  unpause; the job worker unpauses any managed container left paused at start.
+- **Henry's key is not in its backups.** On the Mac it lives in the Keychain;
+  `henry key export` is how it is kept, `henry key import` how it returns.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.

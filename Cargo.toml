@@ -22,6 +22,7 @@ proof = { path = "crates/proof" }
 sound = { path = "crates/sound" }
 ghost = { path = "crates/ghost" }
 draft = { path = "crates/draft" }
+ark = { path = "crates/ark" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }

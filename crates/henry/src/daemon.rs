@@ -7,8 +7,9 @@
 //!   down at boot, the first passes bring it up rather than Henry refusing to
 //!   start. Proof judges what Plumb runs, and Hinge routes what Proof promoted
 //!   in the same tick.
-//! - The job worker, one job at a time (builds are heavy): Press's deploys
-//!   and Draft's onboardings. Draft's pass runs on the tick, after Proof.
+//! - The job worker, one job at a time (builds are heavy): Press's deploys,
+//!   Draft's onboardings and Ark's backups. Draft's pass runs on the tick,
+//!   after Proof, and so does Ark's schedule.
 //! - Press's poll of every auto-deploying branch.
 //! - The loopback HTTP endpoint, for GitHub's push webhook.
 //!
@@ -75,6 +76,7 @@ pub fn run(home: &Home) -> Result<()> {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut engine: Option<(Plumb<Engine, Host>, Proof<Engine>)> = None;
         let mut last_connect_error: Option<String> = None;
+        let mut warned_ark = false;
         loop {
             tokio::select! {
                 _ = term.recv() => break,
@@ -131,6 +133,21 @@ pub fn run(home: &Home) -> Result<()> {
                         Ok(r) if r != draft::Report::default() => info!(?r, "onboarding"),
                         Ok(_) => {}
                         Err(e) => warn!("draft pass failed: {e}"),
+                    }
+                    if let Some(ac) = &config.ark {
+                        match crate::backup::ready(&config, &hush) {
+                            Ok(true) => match ark::schedule(&canon, &crate::backup::settings(home, ac)) {
+                                Ok(q) if !q.is_empty() => info!(?q, "backups queued"),
+                                Ok(_) => {}
+                                Err(e) => warn!("cannot schedule backups: {e}"),
+                            },
+                            Ok(false) if !warned_ark => {
+                                warn!("[ark] is set but henry/{} is not; no backups yet", crate::backup::RESTIC_PASSWORD);
+                                warned_ark = true;
+                            }
+                            Ok(false) => {}
+                            Err(e) => warn!("cannot read backup secrets: {e}"),
+                        }
                     }
                     match hinge.pass().await {
                         Ok(_) => last_hinge_error = None,
@@ -234,7 +251,7 @@ fn railpack(home: &Home, config: &Config, engine: &std::path::Path) -> Option<Ra
     Some(Railpack { program, buildkit_image: config.press.buildkit_image.clone(), shims })
 }
 
-fn which(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn which(name: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }
@@ -250,7 +267,7 @@ fn shim(dir: &std::path::Path, name: &str, target: &std::path::Path) -> std::io:
     Ok(dir.to_path_buf())
 }
 
-fn builder_program(config: &Config) -> std::path::PathBuf {
+pub(crate) fn builder_program(config: &Config) -> std::path::PathBuf {
     if let Some(p) = &config.press.builder {
         return p.clone();
     }
@@ -265,6 +282,10 @@ fn builder_program(config: &Config) -> std::path::PathBuf {
 
 /// Run queued jobs, one at a time.
 async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
+    // A backup cut off mid-copy may have left containers paused.
+    if config.ark.is_some() {
+        ark::unpause_all(&crate::backup::engine(&config)).await;
+    }
     loop {
         let job = match canon.claim() {
             Ok(Some(job)) => job,
@@ -281,6 +302,10 @@ async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
         let outcome = match job.kind.as_str() {
             press::JOB => match press(&home, &config, &hush, canon.clone()) {
                 Ok(p) => p.run(&job).await.map(|o| o.to_string()).map_err(|e| (e.is_transient(), e.to_string())),
+                Err(e) => Err((false, format!("{e:#}"))),
+            },
+            ark::JOB => match crate::backup::ark(&home, &config, canon.clone(), &hush) {
+                Ok(a) => a.run(&job).await.map_err(|e| (e.is_transient(), e.to_string())),
                 Err(e) => Err((false, format!("{e:#}"))),
             },
             draft::JOB => match draft(&home, &config, hush.clone(), canon.clone()) {
@@ -353,7 +378,7 @@ async fn connect(config: &Config, canon: Arc<Canon>, hush: Arc<Hush>) -> Result<
 /// Hold `henry.lock` for the life of the process. The OS drops the lock when
 /// the process dies, however it dies, so a stale lock cannot exist. hostd
 /// needed a PID re-check dance to approximate this.
-fn lock(home: &Home) -> Result<File> {
+pub(crate) fn lock(home: &Home) -> Result<File> {
     let mut file = File::options().create(true).truncate(false).write(true).open(home.lock())?;
     match file.try_lock() {
         Ok(()) => {}

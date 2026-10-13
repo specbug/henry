@@ -128,6 +128,31 @@ const MIGRATIONS: &[&str] = &[
         content TEXT NOT NULL,
         PRIMARY KEY (app, path)
     ) STRICT;",
+    // 5: Ark's record of every backup and restore drill. `target` is
+    // `service/volume`, or `canon` for Henry's own state (app `henry`).
+    // No foreign key: a removed app's backups still exist in the repository.
+    "CREATE TABLE backups (
+        id       INTEGER PRIMARY KEY,
+        app      TEXT NOT NULL,
+        target   TEXT NOT NULL,
+        snapshot TEXT,
+        bytes    INTEGER,
+        ok       INTEGER NOT NULL,
+        detail   TEXT,
+        at       INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX backups_by_target ON backups (app, target, id DESC);
+
+    CREATE TABLE drills (
+        id       INTEGER PRIMARY KEY,
+        app      TEXT NOT NULL,
+        target   TEXT NOT NULL,
+        snapshot TEXT NOT NULL,
+        ok       INTEGER NOT NULL,
+        detail   TEXT,
+        at       INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX drills_by_target ON drills (app, target, id DESC);",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

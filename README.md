@@ -8,10 +8,10 @@ and upgrades.
 The design rests on one rule: an AI may propose how an app runs, but only a
 fixed set of checks may declare it live.
 
-> **Status: milestone 6 of 10.** Point Henry at a repo and it works out how to
-> run it, builds it, proves it and routes it; every push after that is built,
-> soaked and goes live only if it holds. Backups are next. See
-> [Build order](#build-order).
+> **Status: milestone 7 of 10.** Point Henry at a repo and it works out how to
+> run it, builds it, proves it, routes it and backs it up; every push after
+> that is built, soaked and goes live only if it holds, and every backup is
+> proven by a restore drill. Upkeep is next. See [Build order](#build-order).
 
 ## The parts
 
@@ -21,7 +21,7 @@ something second about how.
 
 | Name | Part | Status |
 | --- | --- | --- |
-| **Henry** | The daemon and CLI | running Plumb, Press, Proof, Hinge and Draft |
+| **Henry** | The daemon and CLI | running Plumb, Press, Proof, Hinge, Draft and Ark |
 | **Canon** | SQLite desired state: apps, routes, releases, jobs, events | done |
 | **Lease** | The per-app spec, `lease.toml`, and its policy checks | done |
 | **Hush** | Secrets, sealed at rest with a key in the macOS Keychain | done |
@@ -33,7 +33,7 @@ something second about how.
 | **Draft** | Onboarding, from repo URL to Live, round by round | done |
 | **Sound** | The repo scan that uses no AI | done |
 | **Ghost** | The AI, which proposes and never decides | done |
-| **Ark** | Backups to R2 with restic, and restore drills | milestone 7 |
+| **Ark** | Backups to R2 with restic, and restore drills | done |
 | **Mend** | The upkeep loop: upgrades with automatic rollback | milestone 8 |
 | **Bench** | The model eval that decides the default model | milestone 8 |
 | **Glass** | The web UI, behind Cloudflare Access | milestone 9 |
@@ -202,6 +202,67 @@ restart_after = 6
 signatures = ["level=fatal"]   # more log lines that mean a crash
 ```
 
+## How backups work
+
+Every day Ark backs up each volume of each live app to a restic repository,
+normally on R2, and keeps 7 daily, 4 weekly and 6 monthly snapshots. Each
+snapshot is consistent, taken the way its lease says:
+
+| `backup =` | How |
+| --- | --- |
+| `"files"` (or unset) | the volume's files, with the containers using it paused for the copy |
+| `"sqlite:<path>"` | SQLite's `.backup` of the database, plus the volume's other files; the app keeps running |
+| `"postgres"` | `pg_dumpall` through the running server |
+| `"redis"` | `BGSAVE`, then the dump file |
+
+**A backup counts once it has been restored.** Every month, and after an
+app's first backup, Ark restores the newest snapshot into a scratch volume
+(and a scratch Postgres or Redis server) and checks it: the files unpack, the
+SQLite database passes its integrity check, the server comes up and answers.
+`henry backups <app>` shows each volume's last backup and last drill; a volume
+never drilled says so.
+
+Henry backs itself up too: Canon and `henry.toml`, daily. Mirrors get a copy
+of everything once a day with `restic copy`.
+
+### Setting up backups
+
+1. Create an R2 bucket and an R2 API token with read and write on it.
+2. Tell Henry:
+
+```toml
+# henry.toml
+[ark]
+repository = "s3:https://<account id>.r2.cloudflarestorage.com/<bucket>/henry"
+mirrors = ["rclone:gdrive:henry"]   # optional; rclone must be set up for the remote
+```
+
+```sh
+brew install restic                         # and rclone, for a Google Drive mirror
+henry secret set henry/RESTIC_PASSWORD      # keep a copy: without it nothing can be restored
+henry secret set henry/R2_ACCESS_KEY_ID
+henry secret set henry/R2_SECRET_ACCESS_KEY
+henry key export                            # keep this with the restic password
+henry reload
+```
+
+### Restoring
+
+```sh
+henry stop draw
+henry restore draw/db/pg --yes              # newest snapshot; --snapshot <id> for another
+henry start draw
+```
+
+A restore refuses while anything uses the volume. A database comes back
+through a temporary server running with the app's own password.
+
+To rebuild on a new Mac: install Henry, `henry key import` (paste the key),
+set the three secrets above, add `[ark]`, then `henry restore henry --yes` with
+the daemon stopped. Every app, lease, route and sealed secret comes back.
+Then `henry install`; the apps start with empty volumes, and each comes back
+with `henry stop`, `henry restore <app>/<service>/<volume> --yes`, `henry start`.
+
 ## How a request reaches an app
 
 ```
@@ -264,6 +325,8 @@ cargo build --release
 ./target/release/henry apps                      # every app and its state
 ./target/release/henry show draw                 # routes, secrets, releases, events
 ./target/release/henry routes                    # public hostnames and where they go
+./target/release/henry backups draw              # last backup and restore drill per volume
+./target/release/henry backup draw               # back up now
 ./target/release/henry reload                    # reread henry.toml and Henry's secrets
 ./target/release/henry install                   # run at login under launchd
 ```
@@ -279,8 +342,8 @@ the paths; `HENRY_HOME` overrides them.
 3. **Press** — fetch, build and release on push.
 4. **Hinge** — Caddy routes, health-gated switches, tunnel ingress and DNS.
 5. **Proof** — the Live gate.
-6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers. *(this)*
-7. **Ark** — backups and restore drills.
+6. **Draft, Sound, Ghost** — onboarding with AI, Railpack builds, four providers.
+7. **Ark** — backups and restore drills. *(this)*
 8. **Mend and Bench** — upkeep and model eval.
 9. **Glass** — the web UI.
 10. **Migration** — move odyssey and draw off hostd.
@@ -295,9 +358,9 @@ cargo fmt --all
 
 CI runs all three on Linux and macOS. Tests that need a real container engine
 run when `HENRY_ENGINE_TESTS=1` and a Docker or Podman socket is present, and
-Hinge's Caddy test runs when `HENRY_CADDY` names a `caddy` binary. CI runs
-both on Linux.
+Hinge's Caddy test runs when `HENRY_CADDY` names a `caddy` binary, and Ark's
+when `HENRY_RESTIC` names `restic`. CI runs all of them on Linux.
 
 ```sh
-HENRY_ENGINE_TESTS=1 HENRY_CADDY=$(which caddy) cargo test --workspace
+HENRY_ENGINE_TESTS=1 HENRY_CADDY=$(which caddy) HENRY_RESTIC=$(which restic) cargo test --workspace
 ```

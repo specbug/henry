@@ -89,7 +89,7 @@ pub fn volume_name(app: &str, volume: &str) -> String {
     format!("henry-{app}-{volume}")
 }
 
-fn container_name(app: &str, service: &str, release: Option<i64>) -> String {
+pub fn container_name(app: &str, service: &str, release: Option<i64>) -> String {
     match release {
         Some(r) => format!("{app}-{service}-r{r}"),
         None => format!("{app}-{service}"),
