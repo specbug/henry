@@ -99,6 +99,29 @@ Services reach each other by service name (db:5432). Every service needs a port 
 
 Work briefly: read the files that matter (manifests, Dockerfiles, entry points, config), then call `propose`. Explain your choices in `notes`."#;
 
+/// Whatever proposes plans: Ghost on a real model, or a script in tests.
+/// Draft and Bench take any planner.
+pub trait Planner: Send + Sync {
+    fn name(&self) -> String;
+    fn propose(
+        &self,
+        brief: &Brief<'_>,
+        ws: &Workspace,
+        budget: u64,
+        settings: &Settings,
+    ) -> impl std::future::Future<Output = Outcome> + Send;
+}
+
+impl Planner for Model {
+    fn name(&self) -> String {
+        Model::name(self)
+    }
+
+    async fn propose(&self, brief: &Brief<'_>, ws: &Workspace, budget: u64, settings: &Settings) -> Outcome {
+        Model::propose(self, brief, ws, budget, settings).await
+    }
+}
+
 impl Model {
     /// Ask for one plan. `budget` is the tokens left to spend; the loop
     /// stops once a call takes it to zero.

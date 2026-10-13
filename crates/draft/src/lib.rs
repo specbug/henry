@@ -12,7 +12,6 @@
 //! fails. Every step is written to Canon before it is taken, so a crash
 //! resumes the onboarding rather than restarting it.
 
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -83,27 +82,7 @@ impl Default for Settings {
     }
 }
 
-/// Whatever proposes plans: Ghost on a real model, or a script in tests.
-pub trait Planner: Send + Sync {
-    fn name(&self) -> String;
-    fn propose(
-        &self,
-        brief: &Brief<'_>,
-        ws: &Workspace,
-        budget: u64,
-        settings: &ghost::Settings,
-    ) -> impl Future<Output = ghost::Outcome> + Send;
-}
-
-impl Planner for ghost::Model {
-    fn name(&self) -> String {
-        ghost::Model::name(self)
-    }
-
-    async fn propose(&self, brief: &Brief<'_>, ws: &Workspace, budget: u64, s: &ghost::Settings) -> ghost::Outcome {
-        ghost::Model::propose(self, brief, ws, budget, s).await
-    }
-}
+pub use ghost::Planner;
 
 /// Begin onboarding a repo as `app`.
 pub fn start(

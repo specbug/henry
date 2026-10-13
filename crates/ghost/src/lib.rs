@@ -21,7 +21,7 @@ use hush::Secret;
 use lease::Provider;
 use serde::Serialize;
 
-pub use propose::{Attempt, Brief, Outcome, Settings};
+pub use propose::{Attempt, Brief, Outcome, Planner, Settings};
 pub use tools::Workspace;
 
 #[derive(Debug, thiserror::Error)]

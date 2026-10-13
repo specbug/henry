@@ -379,3 +379,28 @@ fn backups_and_drills_remember_the_last_good_one() {
     assert!(!db.last_drill("draw", "db/pg").unwrap().unwrap().ok);
     assert_eq!(db.last_good_drill("draw", "db/pg").unwrap().unwrap().snapshot, "aaaa1111");
 }
+
+#[test]
+fn upkeep_tools_and_bench_are_remembered() {
+    let db = Canon::open_in_memory().unwrap();
+    db.record_upkeep("disk", true, "freed 2 images").unwrap();
+    db.record_upkeep("disk", false, "engine away").unwrap();
+    let u = db.upkeep("disk").unwrap().unwrap();
+    assert!(!u.ok);
+    assert_eq!(db.upkeeps().unwrap().len(), 1, "one row per task");
+    assert_eq!(db.events(None, 5).unwrap()[0].kind, "mend.failed");
+
+    db.set_tool("caddy", "2.10.2", None, None).unwrap();
+    db.set_tool("caddy", "2.10.2", None, Some("2.11.0")).unwrap();
+    db.set_tool("caddy", "2.11.0", Some("2.10.2"), None).unwrap();
+    let t = db.tool("caddy").unwrap().unwrap();
+    assert_eq!((t.current.as_str(), t.previous.as_deref(), t.pending), ("2.11.0", Some("2.10.2"), None));
+    let changes = db.events(None, 10).unwrap().iter().filter(|e| e.kind == "mend.tool").count();
+    assert_eq!(changes, 2, "only changes of the current version are events");
+
+    db.record_bench("meta/a", 5, 7, 900, &serde_json::json!({})).unwrap();
+    db.record_bench("claude/b", 7, 7, 1200, &serde_json::json!({})).unwrap();
+    db.record_bench("meta/a", 6, 7, 800, &serde_json::json!({})).unwrap();
+    let latest: Vec<(String, i64)> = db.bench_latest().unwrap().into_iter().map(|b| (b.model, b.passed)).collect();
+    assert_eq!(latest, [("claude/b".to_owned(), 7), ("meta/a".to_owned(), 6)]);
+}
