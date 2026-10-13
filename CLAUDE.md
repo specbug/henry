@@ -27,12 +27,13 @@ plain words.
 | Ghost | `crates/ghost` | provider adapters (`openai.rs` for Meta/Gemini/OpenAI, `claude.rs`), the tool loop (`propose.rs`) |
 | Draft | `crates/draft` | onboarding rounds: a Canon job (`run`) and a tick (`pass`); `henry/src/ai.rs` picks the model |
 | Ark | `crates/ark` | backups: `restic.rs` (CLI, secrets in env), `engine.rs` (helper containers, scripts), drills; `henry/src/backup.rs` builds it |
-| Mend / Bench | (milestone 8) | upkeep / model eval |
+| Mend | `crates/mend` | upkeep: `disk.rs`, `host.rs`, `tools.rs` (owned binaries); `henry/src/upkeep.rs` runs each task and the tool gate |
+| Bench | `crates/bench` | the model eval: `cases.rs` repos with traps, scored by `faults` |
 | Glass | (milestone 9) | web UI |
 
-The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, Draft's pass, Ark's schedule, then Hinge
-on a tick, and three side tasks: the job worker (Press, Draft and Ark jobs), Press's poll, and
-the loopback HTTP endpoint (`henry/src/http.rs`).
+The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, Draft's pass, Ark's and Mend's schedules,
+then Hinge on a tick, and three side tasks: the job worker (Press, Draft, Ark and Mend jobs; a
+Mend job's `app` is its task), Press's poll, and the loopback HTTP endpoint (`henry/src/http.rs`).
 
 ## Commands
 
@@ -113,6 +114,14 @@ the engine tests real.
   unpause; the job worker unpauses any managed container left paused at start.
 - **Henry's key is not in its backups.** On the Mac it lives in the Keychain;
   `henry key export` is how it is kept, `henry key import` how it returns.
+- **Upkeep proves itself or undoes itself.** A refreshed image goes on trial
+  through Proof; a tool switch is kept only if `HenryGate` passes, else the
+  `current` link goes back. Canon records `pending` before a switch, and
+  `Tools::recover` undoes an unproven one at start.
+- **Mend reports the Mac, it does not change it.** Host checks read settings;
+  anything needing sudo is yours.
+- **Bench never lets a model judge.** Scores come from `bench::faults` over a
+  checked lease; Henry recommends a model, it never switches by itself.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.

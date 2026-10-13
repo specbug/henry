@@ -10,6 +10,7 @@ mod host;
 mod http;
 mod launchd;
 mod time;
+mod upkeep;
 
 use std::process::ExitCode;
 

@@ -125,7 +125,9 @@ pub enum Refresh {
     Unchanged,
     /// A new release is on trial, with these services' images changed.
     Released(i64, Vec<String>),
-    /// The live commit no longer builds, e.g. its base image moved on.
+    /// The live commit could not be rebuilt: a registry or the network
+    /// failing, or a base image that moved on in a way the build cannot
+    /// follow. The live release is untouched either way.
     Failed(String),
 }
 
@@ -226,7 +228,7 @@ impl<B: Builder> Press<B> {
         self.canon.set_release_state(release.id, ReleaseState::Building, None)?;
         info!(app = name, release = release.id, commit = short, "building");
 
-        let images = match self.build_all(name, &release.id.to_string(), &commit, &lease, &dir, None).await? {
+        let images = match self.build_all(name, &format!("r{}", release.id), &commit, &lease, &dir, None).await? {
             Ok(images) => images,
             Err(why) => return self.fail(&release, why),
         };
@@ -274,7 +276,7 @@ impl<B: Builder> Press<B> {
                 tag.push_str(&format!("-{stamp}"));
             }
             if !self.builder.has(&tag).await? {
-                let log = self.settings.logs.join(format!("{name}-r{log_id}-{}.log", service.name));
+                let log = self.settings.logs.join(format!("{name}-{log_id}-{}.log", service.name));
                 let labels = vec![
                     ("dev.henry.managed".to_owned(), "1".to_owned()),
                     ("dev.henry.app".to_owned(), name.to_owned()),

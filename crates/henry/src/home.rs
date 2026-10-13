@@ -75,6 +75,17 @@ impl Home {
         self.root.join("shims")
     }
 
+    /// Binaries Henry owns and upgrades: `tools/<name>/<version>/`.
+    pub fn tools(&self) -> PathBuf {
+        self.root.join("tools")
+    }
+
+    /// The binary to run for a tool: Henry's own copy when it manages one,
+    /// otherwise what the config names.
+    pub fn tool(&self, name: &str, configured: &std::path::Path) -> PathBuf {
+        mend::tools::Tools::current(&self.tools(), name).unwrap_or_else(|| configured.to_path_buf())
+    }
+
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
@@ -109,6 +120,7 @@ pub struct Config {
     pub proof: ProofConfig,
     /// Unset: no backups.
     pub ark: Option<ArkConfig>,
+    pub mend: MendConfig,
     /// Unset: no tunnel, and Caddy serves on loopback only.
     pub cloudflare: Option<CloudflareConfig>,
 }
@@ -286,6 +298,39 @@ fn ark_monthly() -> u32 {
     6
 }
 
+/// Upkeep. Every task runs unless listed in `off`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MendConfig {
+    /// Tasks not to run: any of disk, refresh, host, tools, bench.
+    pub off: Vec<String>,
+    /// Releases per app whose images are kept for a rollback.
+    pub keep_releases: usize,
+    pub log_days: u64,
+    /// Model tokens one Bench run of one model may spend.
+    pub bench_tokens: u64,
+    /// Where tool releases are looked up.
+    pub github_api: String,
+}
+
+impl Default for MendConfig {
+    fn default() -> Self {
+        MendConfig {
+            off: vec![],
+            keep_releases: 3,
+            log_days: 30,
+            bench_tokens: 1_500_000,
+            github_api: "https://api.github.com".into(),
+        }
+    }
+}
+
+impl MendConfig {
+    pub fn tasks(&self) -> Vec<mend::Task> {
+        mend::Task::ALL.into_iter().filter(|t| !self.off.iter().any(|o| o == t.as_str())).collect()
+    }
+}
+
 /// Henry's own HTTP endpoint. Loopback only: Hinge exposes the webhook path.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -347,11 +392,19 @@ pub struct AiConfig {
     pub max_tokens: u64,
     /// Endpoint overrides by provider, e.g. `meta = "https://…/v1"`.
     pub endpoints: std::collections::BTreeMap<String, String>,
+    /// Other `provider/model`s Bench scores against the default each week.
+    pub candidates: Vec<String>,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
-        AiConfig { default_model: None, max_rounds: 5, max_tokens: 2_000_000, endpoints: Default::default() }
+        AiConfig {
+            default_model: None,
+            max_rounds: 5,
+            max_tokens: 2_000_000,
+            endpoints: Default::default(),
+            candidates: vec![],
+        }
     }
 }
 
