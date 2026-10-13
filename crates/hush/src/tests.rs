@@ -124,3 +124,17 @@ fn a_corrupt_key_file_is_an_error_not_a_new_key() {
     std::fs::write(&path, "not hex").unwrap();
     assert!(matches!(FileKey { path }.load_or_create(), Err(Error::Key(_))));
 }
+
+#[test]
+fn a_key_moves_to_a_new_mac_and_never_over_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = FileKey { path: dir.path().join("old.key") };
+    let new = FileKey { path: dir.path().join("new.key") };
+    assert!(new.load().unwrap().is_none(), "loading never creates a key");
+    let key = old.load_or_create().unwrap();
+    let carried = Key::from_hex(&key.to_hex()).unwrap();
+    new.import(&carried).unwrap();
+    assert_eq!(new.load().unwrap().unwrap().bytes(), key.bytes());
+    let other = Key::generate().unwrap();
+    assert!(new.import(&other).unwrap_err().to_string().contains("already holds a key"));
+}

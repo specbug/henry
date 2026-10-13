@@ -22,11 +22,13 @@ impl Key {
         &self.0
     }
 
-    fn to_hex(&self) -> Zeroizing<String> {
+    /// The key as hex, for writing down somewhere safe. A restore of
+    /// Henry's state on a new Mac needs it: Canon's secrets are sealed with it.
+    pub fn to_hex(&self) -> Zeroizing<String> {
         Zeroizing::new(hex::encode(self.0.as_ref()))
     }
 
-    fn from_hex(text: &str) -> Result<Key> {
+    pub fn from_hex(text: &str) -> Result<Key> {
         let mut bytes = Zeroizing::new([0u8; KEY_LEN]);
         hex::decode_to_slice(text.trim(), bytes.as_mut())
             .map_err(|e| Error::Key(format!("stored key is malformed: {e}")))?;
@@ -37,6 +39,11 @@ impl Key {
 pub trait KeyStore {
     /// Return the key, creating and storing a new one if none exists yet.
     fn load_or_create(&self) -> Result<Key>;
+    /// The stored key, if there is one; never creates one.
+    fn load(&self) -> Result<Option<Key>>;
+    /// Store a key brought from elsewhere. Refuses to replace a key: that
+    /// would make every sealed secret unreadable.
+    fn import(&self, key: &Key) -> Result<()>;
 }
 
 /// A key in a file readable only by you. For Linux, development and tests;
@@ -57,6 +64,21 @@ impl KeyStore for FileKey {
             }
             Err(e) => Err(Error::Key(format!("{}: {e}", self.path.display()))),
         }
+    }
+
+    fn load(&self) -> Result<Option<Key>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Key::from_hex(&Zeroizing::new(text)).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::Key(format!("{}: {e}", self.path.display()))),
+        }
+    }
+
+    fn import(&self, key: &Key) -> Result<()> {
+        write_private(&self.path, key.to_hex().as_bytes()).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => Error::Key(format!("{} already holds a key", self.path.display())),
+            _ => Error::Key(format!("{}: {e}", self.path.display())),
+        })
     }
 }
 
@@ -111,5 +133,28 @@ impl KeyStore for Keychain {
             }
             Err(e) => Err(Error::Key(format!("Keychain read failed: {e}"))),
         }
+    }
+
+    fn load(&self) -> Result<Option<Key>> {
+        use security_framework::passwords::get_generic_password;
+        const NOT_FOUND: i32 = -25300;
+        match get_generic_password(&self.service, &self.account) {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                let text = std::str::from_utf8(&bytes).map_err(|_| Error::Key("Keychain item is not text".into()))?;
+                Key::from_hex(text).map(Some)
+            }
+            Err(e) if e.code() == NOT_FOUND => Ok(None),
+            Err(e) => Err(Error::Key(format!("Keychain read failed: {e}"))),
+        }
+    }
+
+    fn import(&self, key: &Key) -> Result<()> {
+        use security_framework::passwords::set_generic_password;
+        if self.load()?.is_some() {
+            return Err(Error::Key("the Keychain already holds a Henry key".into()));
+        }
+        set_generic_password(&self.service, &self.account, key.to_hex().as_bytes())
+            .map_err(|e| Error::Key(format!("Keychain write failed: {e}")))
     }
 }

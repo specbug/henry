@@ -105,6 +105,27 @@ enum Cmd {
     /// Set, list or remove secrets.
     #[command(subcommand)]
     Secret(SecretCmd),
+    /// Back up an app now, or `henry` for Henry's own state.
+    Backup { app: String },
+    /// An app's backups (or `henry`'s), and whether each has been restored
+    /// in a drill.
+    Backups { app: String },
+    /// Restore `<app>/<service>/<volume>` over its live volume from its newest
+    /// snapshot. Stop the app first. `henry restore henry` restores Henry's
+    /// own state into this home, e.g. on a new Mac; the daemon must be stopped.
+    Restore {
+        target: String,
+        /// A snapshot id instead of the newest.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Confirm. A restore replaces what is there.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Export or import the master key that seals every secret. Keep a copy
+    /// with your restic password: restoring Henry on a new Mac needs both.
+    #[command(subcommand)]
+    Key(KeyCmd),
     /// Install Henry, Caddy and (with [cloudflare]) cloudflared as LaunchAgents,
     /// so they start at login and stay up.
     Install {
@@ -120,6 +141,14 @@ enum Cmd {
     Reload,
     /// Show where Henry keeps its files.
     Where,
+}
+
+#[derive(Subcommand)]
+enum KeyCmd {
+    /// Print the key, as hex, to stdout.
+    Export,
+    /// Read a key from stdin and store it. Refuses if this Mac has one.
+    Import,
 }
 
 #[derive(Subcommand)]
@@ -171,6 +200,17 @@ pub fn run(args: Args) -> Result<ExitCode> {
             println!("removed {app}");
         }
         Cmd::Secret(cmd) => secret(&home, cmd)?,
+        Cmd::Backup { app } => {
+            let canon = canon(&home)?;
+            if app != ark::HENRY {
+                canon.app(&app)?;
+            }
+            let job = canon.enqueue(ark::JOB, Some(&app), &serde_json::json!({ "force": true }))?;
+            println!("backup of {app} queued (job {}); `henry backups {app}` shows how it went", job.id);
+        }
+        Cmd::Backups { app } => backups(&home, &app)?,
+        Cmd::Restore { target, snapshot, yes } => restore(&home, &target, snapshot.as_deref(), yes)?,
+        Cmd::Key(cmd) => key(&home, cmd)?,
         Cmd::Install { print } => {
             let binary = std::env::current_exe()?.canonicalize()?;
             let config = Config::load(&home.config())?;
@@ -448,6 +488,131 @@ fn show(home: &Home, name: &str) -> Result<()> {
     println!("  events");
     for e in canon.events(Some(&app.name), 10)? {
         println!("    {}  {}", utc(e.at), e.message);
+    }
+    Ok(())
+}
+
+fn backups(home: &Home, app: &str) -> Result<()> {
+    let canon = canon(home)?;
+    let names: Vec<String> = if app == ark::HENRY {
+        vec!["canon".into(), "config".into()]
+    } else {
+        canon.app(app)?;
+        ark::targets(&canon, app)?.iter().map(ark::Target::name).collect()
+    };
+    if names.is_empty() {
+        println!("`{app}` has no volumes on a live release; there is nothing to back up yet");
+    }
+    for name in names {
+        println!("{name}");
+        match canon.last_backup(app, &name)? {
+            None => println!("  backup  never"),
+            Some(b) if b.ok => {
+                let snap = b.snapshot.as_deref().unwrap_or_default();
+                let size = lease::format_bytes(b.bytes.unwrap_or(0).max(0) as u64);
+                println!("  backup  {} — snapshot {}, {size}", utc(b.at), &snap[..snap.len().min(8)]);
+            }
+            Some(b) => {
+                println!("  backup  FAILED {} — {}", utc(b.at), b.detail.as_deref().unwrap_or_default());
+                if let Some(g) = canon.last_good_backup(app, &name)? {
+                    println!("          last good {}", utc(g.at));
+                }
+            }
+        }
+        match (canon.last_drill(app, &name)?, canon.last_good_drill(app, &name)?) {
+            (None, _) if name == "config" => println!("  drill   none needed: a copy of henry.toml"),
+            (None, _) => println!("  drill   never: not yet proven restorable"),
+            (Some(d), _) if d.ok => println!("  drill   passed {} — {}", utc(d.at), d.detail.unwrap_or_default()),
+            (Some(d), good) => {
+                println!("  drill   FAILED {} — {}", utc(d.at), d.detail.unwrap_or_default());
+                match good {
+                    Some(g) => println!("          last passed {}", utc(g.at)),
+                    None => println!("          never passed: not yet proven restorable"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore(home: &Home, target: &str, snapshot: Option<&str>, yes: bool) -> Result<()> {
+    if !yes {
+        bail!("a restore replaces what is there now; run again with --yes to confirm");
+    }
+    let config = Config::load(&home.config())?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    if target == ark::HENRY {
+        // Henry's own state: only with the daemon stopped, since it is
+        // replacing the very database the daemon runs on.
+        let _lock = daemon::lock(home).context("stop Henry first (`henry uninstall`, or stop `henry run`)")?;
+        let restored = home.root.join("canon.db.restored");
+        {
+            let canon = Arc::new(canon(home)?);
+            let hush = open_hush(home, canon.clone())?;
+            let ark = crate::backup::ark(home, &config, canon, &hush)?;
+            rt.block_on(async {
+                let snap = match snapshot {
+                    Some(s) => s.to_owned(),
+                    None => {
+                        ark.latest(ark::HENRY, "canon")
+                            .await?
+                            .context("no backup of Henry's state in the repository")?
+                            .id
+                    }
+                };
+                ark.restore_file(&snap, "henry/canon.db", &restored).await?;
+                println!("restored Henry's state from {}", &snap[..snap.len().min(8)]);
+                anyhow::Ok(())
+            })?;
+        }
+        Canon::open(&restored).context("the restored Canon does not open")?;
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", home.canon().display()));
+        }
+        std::fs::rename(&restored, home.canon())?;
+        println!("start Henry again; it picks up where the backup left off");
+        return Ok(());
+    }
+
+    let mut parts = target.splitn(3, '/');
+    let (Some(app), Some(service), Some(volume)) = (parts.next(), parts.next(), parts.next()) else {
+        bail!("write the target as <app>/<service>/<volume>, or `henry`");
+    };
+    let canon = Arc::new(canon(home)?);
+    let hush = open_hush(home, canon.clone())?;
+    let t = ark::targets(&canon, app)?
+        .into_iter()
+        .find(|t| t.service == service && t.volume == volume)
+        .with_context(|| format!("`{app}` has no volume {service}/{volume} on its live release"))?;
+    let password = hush.get(app, "POSTGRES_PASSWORD")?;
+    let ark = crate::backup::ark(home, &config, canon.clone(), &hush)?;
+    rt.block_on(async {
+        let snap = match snapshot {
+            Some(s) => s.to_owned(),
+            None => ark.latest(app, &t.name()).await?.context("no snapshot of it in the repository")?.id,
+        };
+        println!("{}", ark.restore(&t, &snap, password.as_ref()).await?);
+        anyhow::Ok(())
+    })?;
+    println!("start it again with `henry start {app}`");
+    Ok(())
+}
+
+fn key(home: &Home, cmd: KeyCmd) -> Result<()> {
+    use hush::KeyStore as _;
+    let store = key_store(home);
+    match cmd {
+        KeyCmd::Export => {
+            let key = store.load()?.context("this Mac has no Henry key yet")?;
+            eprintln!("Henry's master key. Anyone with it and your Canon can read every secret; store it offline.");
+            println!("{}", key.to_hex().as_str());
+        }
+        KeyCmd::Import => {
+            let mut text = zeroize::Zeroizing::new(String::new());
+            std::io::stdin().read_to_string(&mut text)?;
+            store.import(&hush::Key::from_hex(&text)?)?;
+            println!("imported the key; `henry restore henry` can now bring back Henry's state");
+        }
     }
     Ok(())
 }

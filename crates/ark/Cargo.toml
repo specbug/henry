@@ -1,0 +1,22 @@
+[package]
+name = "ark"
+description = "Backups: what survives the flood, and the drill that proves it would"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canon.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+hush.workspace = true
+lease.workspace = true
+plumb.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

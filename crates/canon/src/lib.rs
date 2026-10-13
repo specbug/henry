@@ -8,6 +8,7 @@
 //! power cut [`Canon::requeue_interrupted`] puts every half-done job back
 //! on the queue and the daemon simply carries on.
 
+mod ark;
 mod draft;
 mod schema;
 
@@ -18,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lease::Lease;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+pub use ark::{Backup, Drill};
 pub use draft::{Draft, NewProposal, Proposal};
 pub use rusqlite;
 pub use schema::LATEST as SCHEMA_VERSION;
