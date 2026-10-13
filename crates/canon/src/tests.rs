@@ -295,3 +295,69 @@ fn releases_are_found_by_commit_and_superseded_by_newer_ones() {
     assert_eq!(db.release(b.id).unwrap().state, ReleaseState::Pending);
     assert_eq!(db.release(live.id).unwrap().state, ReleaseState::Live);
 }
+
+#[test]
+fn a_draft_walks_its_stages_and_logs_each_once() {
+    let db = Canon::open_in_memory().unwrap();
+    let d = db.start_draft("draw", "https://github.com/me/draw", None, Some("draw.example.com")).unwrap();
+    assert_eq!((d.stage, d.round, d.spent), (DraftStage::Survey, 0, 0));
+    assert_eq!(db.next_draft_round("draw").unwrap(), 1);
+    db.set_draft_stage("draw", DraftStage::Plan, None).unwrap();
+    db.set_draft_stage("draw", DraftStage::Plan, None).unwrap();
+    assert_eq!(db.add_draft_spend("draw", 1200).unwrap(), 1200);
+    assert_eq!(db.add_draft_spend("draw", 300).unwrap(), 1500);
+    db.set_draft_release("draw", Some(7)).unwrap();
+    let d = db.draft("draw").unwrap().unwrap();
+    assert_eq!((d.stage, d.round, d.release), (DraftStage::Plan, 1, Some(7)));
+    let stages = db.events(Some("draw"), 10).unwrap().iter().filter(|e| e.kind == "draft.stage").count();
+    assert_eq!(stages, 1, "an unchanged stage is not logged again");
+}
+
+#[test]
+fn only_a_stuck_draft_can_start_over() {
+    let db = db_with("draw", "draw.example.com");
+    assert!(matches!(db.start_draft("draw", "repo", None, None), Err(Error::AppExists(_))), "an app has the name");
+
+    db.start_draft("site", "repo", None, None).unwrap();
+    assert!(matches!(db.start_draft("site", "repo", None, None), Err(Error::AppExists(_))), "still onboarding");
+    db.next_draft_round("site").unwrap();
+    db.set_draft_stage("site", DraftStage::Stuck, Some("out of rounds")).unwrap();
+    let d = db.start_draft("site", "repo2", Some("dev"), None).unwrap();
+    assert_eq!((d.stage, d.round, d.repo.as_str(), d.branch.as_deref()), (DraftStage::Survey, 0, "repo2", Some("dev")));
+}
+
+#[test]
+fn proposals_keep_every_plan_and_its_verdict() {
+    let db = Canon::open_in_memory().unwrap();
+    let files = serde_json::json!({ ".henry/Dockerfile.web": "FROM scratch" });
+    let generate = serde_json::json!([{ "name": "POSTGRES_PASSWORD" }]);
+    let first = db
+        .add_proposal(&NewProposal {
+            app: "draw",
+            round: 1,
+            source: "ghost",
+            model: Some("claude/claude-sonnet-5-5"),
+            lease: "name = \"draw\"",
+            files: &files,
+            generate: &generate,
+            notes: "a guess",
+        })
+        .unwrap();
+    db.set_proposal_verdict(first, "did not build").unwrap();
+    let all = db.proposals("draw", 10).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].verdict.as_deref(), Some("did not build"));
+    assert_eq!(all[0].files, files);
+    assert_eq!(all[0].generate, generate);
+}
+
+#[test]
+fn overlays_are_replaced_whole_and_go_with_the_app() {
+    let db = db_with("draw", "draw.example.com");
+    db.set_overlays("draw", &[(".henry/a".into(), "1".into()), (".henry/b".into(), "2".into())]).unwrap();
+    db.set_overlays("draw", &[(".henry/b".into(), "3".into())]).unwrap();
+    assert_eq!(db.overlays("draw").unwrap(), [(".henry/b".to_owned(), "3".to_owned())]);
+    db.start_draft("other", "repo", None, None).unwrap();
+    db.remove_app("draw").unwrap();
+    assert!(db.overlays("draw").unwrap().is_empty());
+}

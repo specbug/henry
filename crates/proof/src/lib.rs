@@ -248,6 +248,10 @@ impl<R: Runtime> Proof<R> {
                     t.stage_at = now;
                     t.log_since = now / 1000;
                     self.canon.set_release_state(release.id, ReleaseState::Proof, Some("soak started"))?;
+                } else if app.status == Status::NeedsYou {
+                    // Waiting on you for a secret is not the release's fault:
+                    // the clock starts once Plumb can start it.
+                    t.started_at = now;
                 } else if now - t.started_at > self.settings.start_timeout.as_millis() as i64 {
                     let why = format!("never came up: {} not running", missing.join(", "));
                     return self.fail(app, release, why, report);

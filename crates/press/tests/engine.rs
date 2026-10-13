@@ -57,7 +57,7 @@ async fn a_push_is_built_into_an_image() {
     );
     let canon = Arc::new(Canon::open_in_memory().unwrap());
     canon.insert_app(&Lease::parse(&text).unwrap(), &text, &origin, Source::Operator).unwrap();
-    let builder = CliBuilder { program: program.into(), timeout: Duration::from_secs(600) };
+    let builder = CliBuilder { program: program.into(), timeout: Duration::from_secs(600), railpack: None };
     let settings = Settings {
         checkouts: dir.path().join("checkouts"),
         logs: dir.path().join("logs"),
@@ -73,7 +73,7 @@ async fn a_push_is_built_into_an_image() {
     let release = canon.release(id).unwrap();
     assert_eq!(release.state, ReleaseState::Trial);
     let tag = release.images["job"].as_str().unwrap().to_owned();
-    let check = CliBuilder { program: program.into(), timeout: Duration::from_secs(60) };
+    let check = CliBuilder { program: program.into(), timeout: Duration::from_secs(60), railpack: None };
     assert!(check.has(&tag).await.unwrap(), "{tag} exists after the build");
     let _ = Command::new(program).args(["image", "rm", "-f", &tag]).output();
 }

@@ -33,6 +33,28 @@ enum Cmd {
     Run,
     /// Check a lease.toml without registering anything.
     Check { lease: PathBuf },
+    /// Onboard a GitHub repo: Henry surveys it, plans how to run it (with
+    /// AI when a provider key is set), builds it and proves it. Follow it
+    /// with `henry show <app>`.
+    Onboard {
+        /// The repo, e.g. https://github.com/you/draw.
+        repo: String,
+        /// The app's name. Default: the repo's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// The public hostname, e.g. draw.example.com. Omit to keep it private.
+        #[arg(long)]
+        hostname: Option<String>,
+        /// The branch to deploy. Default: the repo's default branch.
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Every plan onboarding weighed for an app, newest first, in full.
+    Plans {
+        app: String,
+        #[arg(short = 'n', long, default_value_t = 3)]
+        limit: usize,
+    },
     /// Register an app from a lease you wrote.
     Add {
         lease: PathBuf,
@@ -123,6 +145,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
     match args.cmd {
         Cmd::Run => daemon::run(&home)?,
         Cmd::Check { lease } => return check(&home, &lease),
+        Cmd::Onboard { repo, name, hostname, branch } => {
+            onboard(&home, &repo, name.as_deref(), hostname.as_deref(), branch.as_deref())?
+        }
+        Cmd::Plans { app, limit } => plans(&home, &app, limit)?,
         Cmd::Add { lease, repo } => add(&home, &lease, &repo)?,
         Cmd::Apps => apps(&home)?,
         Cmd::Show { app } => show(&home, &app)?,
@@ -291,9 +317,12 @@ fn add(home: &Home, path: &std::path::Path, repo: &str) -> Result<()> {
 }
 
 fn apps(home: &Home) -> Result<()> {
-    let apps = canon(home)?.apps()?;
-    if apps.is_empty() {
-        println!("no apps yet; register one with `henry add lease.toml --repo <url>`");
+    let canon = canon(home)?;
+    let apps = canon.apps()?;
+    // Onboardings that have not yet produced an app.
+    let drafts: Vec<_> = canon.drafts()?.into_iter().filter(|d| !apps.iter().any(|a| a.name == d.app)).collect();
+    if apps.is_empty() && drafts.is_empty() {
+        println!("no apps yet; onboard one with `henry onboard <repo url>`");
         return Ok(());
     }
     println!("{:<20} {:<11} {:<8} {:<8} UPDATED", "APP", "STATUS", "WANTED", "RELEASE");
@@ -301,12 +330,82 @@ fn apps(home: &Home) -> Result<()> {
         let release = a.live_release.map_or_else(|| "-".to_owned(), |r| r.to_string());
         println!("{:<20} {:<11} {:<8} {:<8} {}", a.name, a.status, a.desired, release, utc(a.updated_at));
     }
+    for d in drafts {
+        let status = if d.stage == canon::DraftStage::Stuck { "stuck" } else { "onboarding" };
+        println!("{:<20} {:<11} {:<8} {:<8} {}", d.app, status, "running", "-", utc(d.updated_at));
+    }
+    Ok(())
+}
+
+/// The app name a repo URL suggests: its last path segment, made lease-safe.
+fn name_from_repo(repo: &str) -> Option<String> {
+    let last = repo.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next()?;
+    let name: String =
+        last.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let name = name.trim_matches('-');
+    (!name.is_empty()).then(|| name.chars().take(32).collect::<String>().trim_end_matches('-').to_owned())
+}
+
+fn onboard(home: &Home, repo: &str, name: Option<&str>, hostname: Option<&str>, branch: Option<&str>) -> Result<()> {
+    let name = match name {
+        Some(n) => n.to_owned(),
+        None => name_from_repo(repo).context("cannot tell the app's name from the URL; pass --name")?,
+    };
+    let canon = canon(home)?;
+    draft::start(&canon, &name, repo, branch, hostname)?;
+    println!("onboarding {repo} as `{name}`; the daemon surveys, plans, builds and proves it");
+    println!("follow it with `henry show {name}`");
+    Ok(())
+}
+
+fn plans(home: &Home, app: &str, limit: usize) -> Result<()> {
+    let canon = canon(home)?;
+    let plans = canon.proposals(app, limit)?;
+    if plans.is_empty() {
+        println!("no plans for `{app}`");
+    }
+    for p in plans {
+        let by = p.model.as_deref().map(|m| format!(" ({m})")).unwrap_or_default();
+        println!("── plan {} · round {} · by {}{by} · {}", p.id, p.round, p.source, utc(p.created_at));
+        match &p.verdict {
+            Some(v) => println!("verdict: {}", v.lines().next().unwrap_or_default()),
+            None => println!("verdict: being tried"),
+        }
+        if !p.notes.is_empty() {
+            println!("notes: {}", p.notes);
+        }
+        println!("\n{}", p.lease.trim_end());
+        if let Some(files) = p.files.as_object() {
+            for (path, content) in files {
+                println!("\n# {path}\n{}", content.as_str().unwrap_or_default().trim_end());
+            }
+        }
+        if let Some(generate) = p.generate.as_array().filter(|g| !g.is_empty()) {
+            let names: Vec<&str> = generate.iter().filter_map(|g| g["name"].as_str()).collect();
+            println!("\ngenerated secrets: {}", names.join(", "));
+        }
+        println!();
+    }
     Ok(())
 }
 
 fn show(home: &Home, name: &str) -> Result<()> {
     let canon = Arc::new(canon(home)?);
-    let app = canon.app(name)?;
+    let draft = canon.draft(name)?;
+    let app = match canon.app(name) {
+        Ok(app) => app,
+        Err(canon::Error::NoSuchApp(_)) if draft.is_some() => {
+            let d = draft.expect("checked above");
+            println!("{}\n  repo      {}", d.app, d.repo);
+            print_draft(&d);
+            println!("  events");
+            for e in canon.events(Some(name), 10)? {
+                println!("    {}  {}", utc(e.at), e.message);
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
     let lease = app.lease()?;
     println!("{}", app.name);
     println!("  repo      {} ({})", app.repo, lease.branch);
@@ -316,6 +415,9 @@ fn show(home: &Home, name: &str) -> Result<()> {
     }
     println!("  wanted    {}", app.desired);
     println!("  lease     written by {}", app.source);
+    if let Some(d) = draft.filter(|d| d.stage != canon::DraftStage::Live) {
+        print_draft(&d);
+    }
 
     for r in canon.routes()?.into_iter().filter(|r| r.app == app.name) {
         println!("  route     https://{}{} → {}", r.hostname, r.path, r.service);
@@ -348,6 +450,13 @@ fn show(home: &Home, name: &str) -> Result<()> {
         println!("    {}  {}", utc(e.at), e.message);
     }
     Ok(())
+}
+
+fn print_draft(d: &canon::Draft) {
+    let detail =
+        d.detail.as_deref().map(|x| format!(" — {}", x.lines().next().unwrap_or_default())).unwrap_or_default();
+    println!("  onboard   {}{detail}", d.stage);
+    println!("            round {}, {} AI tokens spent; `henry plans {}` shows each plan", d.round, d.spent, d.app);
 }
 
 fn ps(home: &Home) -> Result<()> {
@@ -405,7 +514,7 @@ fn trial(home: &Home, name: &str, overrides: &[String]) -> Result<()> {
     }
     if !unbuilt.is_empty() {
         bail!(
-            "{} need(s) a build. Pass a prebuilt image with --image {}=<ref>; Henry builds from source once Draft lands",
+            "{} need(s) a build. Pass a prebuilt image with --image {}=<ref>, or `henry deploy` to build from source",
             unbuilt.join(", "),
             unbuilt[0]
         );
@@ -498,6 +607,14 @@ fn label(scope: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+
+    use super::name_from_repo;
+
+    #[test]
+    fn a_repo_url_suggests_a_name() {
+        assert_eq!(name_from_repo("https://github.com/me/Draw_Board.git").as_deref(), Some("draw-board"));
+        assert_eq!(name_from_repo("git@github.com:me/site/").as_deref(), Some("site"));
+    }
 
     #[test]
     fn the_command_line_is_well_formed() {

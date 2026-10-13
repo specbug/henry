@@ -88,6 +88,46 @@ const MIGRATIONS: &[&str] = &[
         state      TEXT NOT NULL,
         updated_at INTEGER NOT NULL
     ) STRICT;",
+    // 4: onboarding. A draft exists before its app does: it is the record of
+    // getting a repo from URL to Live. Proposals are every plan Draft
+    // weighed, Sound's or Ghost's, kept so the UI can show each as a diff.
+    // Overlays are files Henry adds to an app's checkout, such as a
+    // Dockerfile Ghost wrote, since Henry never commits to your repo.
+    "CREATE TABLE drafts (
+        app        TEXT PRIMARY KEY,
+        repo       TEXT NOT NULL,
+        branch     TEXT,
+        hostname   TEXT,
+        stage      TEXT NOT NULL,
+        round      INTEGER NOT NULL DEFAULT 0,
+        spent      INTEGER NOT NULL DEFAULT 0,
+        detail     TEXT,
+        release    INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE proposals (
+        id         INTEGER PRIMARY KEY,
+        app        TEXT NOT NULL,
+        round      INTEGER NOT NULL,
+        source     TEXT NOT NULL,
+        model      TEXT,
+        lease      TEXT NOT NULL,
+        files      TEXT NOT NULL,
+        generate   TEXT NOT NULL,
+        notes      TEXT NOT NULL,
+        verdict    TEXT,
+        created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX proposals_by_app ON proposals (app, id DESC);
+
+    CREATE TABLE overlays (
+        app     TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+        path    TEXT NOT NULL,
+        content TEXT NOT NULL,
+        PRIMARY KEY (app, path)
+    ) STRICT;",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

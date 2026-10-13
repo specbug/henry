@@ -19,7 +19,7 @@ use canon::{Canon, Desired, Job, Release, ReleaseState, Source, serde_json};
 use lease::{Build, Lease};
 use tracing::{info, warn};
 
-use crate::build::{BuildRequest, Builder, tail};
+use crate::build::{BuildRequest, Builder, Recipe, tail};
 use crate::git::Git;
 
 /// The Canon job kind Press runs.
@@ -98,6 +98,22 @@ pub struct Press<B> {
     settings: Settings,
 }
 
+/// Six hex digits naming how an image was built, beyond its commit: the
+/// recipe and Henry's overlay files. During onboarding one commit is built
+/// several ways, and an image from one way must never stand in for another.
+fn recipe_hash(build: &Build, overlays: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(format!("{build:?}"));
+    for (path, content) in overlays {
+        h.update([0]);
+        h.update(path);
+        h.update([0]);
+        h.update(content);
+    }
+    hex::encode(&h.finalize()[..3])
+}
+
 /// Queue a deploy for `app`. Without `commit`, Press releases whatever the
 /// branch points at when the job runs, so a burst of pushes builds once.
 pub fn request(canon: &Canon, app: &str, commit: Option<&str>, force: bool) -> Result<Job> {
@@ -143,10 +159,16 @@ impl<B: Builder> Press<B> {
     /// Run one press job.
     pub async fn run(&self, job: &Job) -> Result<Outcome> {
         let name = job.app.as_deref().ok_or_else(|| Error::Io("a press job names no app".into()))?;
+        let force = job.payload.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+        self.release(name, job.payload.get("commit").and_then(|v| v.as_str()), force).await
+    }
+
+    /// Build `commit` (the branch's head when unset) and put it on trial.
+    /// `force` builds a commit again even if it was handled before.
+    pub async fn release(&self, name: &str, commit: Option<&str>, force: bool) -> Result<Outcome> {
         let app = self.canon.app(name)?;
         let stored = app.lease()?;
-        let force = job.payload.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-        let commit = match job.payload.get("commit").and_then(|v| v.as_str()) {
+        let commit = match commit {
             Some(c) => c.to_owned(),
             None => self
                 .git
@@ -164,6 +186,7 @@ impl<B: Builder> Press<B> {
 
         let dir = self.settings.checkouts.join(name);
         self.git.checkout(&dir, &app.repo, &stored.branch, &commit).await?;
+        self.overlay(name, &dir)?;
 
         // The repo's own lease wins over the stored one, after the same checks.
         let (lease, text) = match self.git.show(&dir, &commit, "lease.toml").await? {
@@ -188,46 +211,43 @@ impl<B: Builder> Press<B> {
         self.canon.set_release_state(release.id, ReleaseState::Building, None)?;
         info!(app = name, release = release.id, commit = short, "building");
 
+        let overlays = self.canon.overlays(name)?;
         let mut images = serde_json::Map::new();
         for service in &lease.services {
-            let image = match &service.build {
-                Build::Image(image) => image.clone(),
-                Build::Railpack { .. } => {
-                    let why = format!(
-                        "`{}` asks for a Railpack build, which arrives with Draft; add a Dockerfile for now",
-                        service.name
-                    );
-                    return self.fail(&release, why);
+            let (context, dockerfile);
+            let recipe = match &service.build {
+                Build::Image(image) => {
+                    images.insert(service.name.clone(), image.clone().into());
+                    continue;
                 }
-                Build::Dockerfile { path, context } => {
-                    let tag = format!("henry/{name}-{}:{short}", service.name);
-                    if !self.builder.has(&tag).await? {
-                        let log = self.settings.logs.join(format!("{name}-r{}-{}.log", release.id, service.name));
-                        let labels = vec![
-                            ("dev.henry.managed".to_owned(), "1".to_owned()),
-                            ("dev.henry.app".to_owned(), name.to_owned()),
-                            ("dev.henry.commit".to_owned(), commit.clone()),
-                        ];
-                        let req = BuildRequest {
-                            context: &dir.join(context),
-                            dockerfile: &dir.join(path),
-                            tag: &tag,
-                            log: &log,
-                            labels: &labels,
-                        };
-                        if let Err(e) = self.build_with_retry(&req).await {
-                            if e.is_transient() {
-                                return Err(e);
-                            }
-                            let last = tail(&log, 15);
-                            let why = format!("`{}` did not build: {e}. Log: {}\n{last}", service.name, log.display());
-                            return self.fail(&release, why);
-                        }
-                    }
-                    tag
+                Build::Railpack { path } => {
+                    context = dir.join(path);
+                    Recipe::Railpack { dir: &context }
+                }
+                Build::Dockerfile { path, context: ctx } => {
+                    (context, dockerfile) = (dir.join(ctx), dir.join(path));
+                    Recipe::Dockerfile { context: &context, dockerfile: &dockerfile }
                 }
             };
-            images.insert(service.name.clone(), image.into());
+            let tag = format!("henry/{name}-{}:{short}-{}", service.name, recipe_hash(&service.build, &overlays));
+            if !self.builder.has(&tag).await? {
+                let log = self.settings.logs.join(format!("{name}-r{}-{}.log", release.id, service.name));
+                let labels = vec![
+                    ("dev.henry.managed".to_owned(), "1".to_owned()),
+                    ("dev.henry.app".to_owned(), name.to_owned()),
+                    ("dev.henry.commit".to_owned(), commit.clone()),
+                ];
+                let req = BuildRequest { recipe, tag: &tag, log: &log, labels: &labels };
+                if let Err(e) = self.build_with_retry(&req).await {
+                    if e.is_transient() {
+                        return Err(e);
+                    }
+                    let last = tail(&log, 15);
+                    let why = format!("`{}` did not build: {e}. Log: {}\n{last}", service.name, log.display());
+                    return self.fail(&release, why);
+                }
+            }
+            images.insert(service.name.clone(), tag.into());
         }
 
         self.canon.set_release_images(release.id, &serde_json::Value::Object(images))?;
@@ -235,6 +255,25 @@ impl<B: Builder> Press<B> {
         self.canon.set_release_state(release.id, ReleaseState::Trial, Some(&format!("built from {short}")))?;
         info!(app = name, release = release.id, "on trial");
         Ok(Outcome::Released(release.id))
+    }
+
+    /// Write Henry's own files (a Dockerfile Ghost wrote, say) into the
+    /// checkout. They live in Canon, since Henry never commits to your repo,
+    /// and only ever under `.henry/`.
+    fn overlay(&self, app: &str, dir: &std::path::Path) -> Result<()> {
+        for (path, content) in self.canon.overlays(app)? {
+            let safe = path.starts_with(".henry/") && !path.split('/').any(|p| p == ".." || p.is_empty());
+            if !safe {
+                warn!(app, path, "skipping an overlay outside .henry/");
+                continue;
+            }
+            let target = dir.join(&path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| Error::Io(format!("{}: {e}", parent.display())))?;
+            }
+            std::fs::write(&target, content).map_err(|e| Error::Io(format!("{}: {e}", target.display())))?;
+        }
+        Ok(())
     }
 
     async fn build_with_retry(&self, req: &BuildRequest<'_>) -> Result<()> {

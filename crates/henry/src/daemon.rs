@@ -7,7 +7,8 @@
 //!   down at boot, the first passes bring it up rather than Henry refusing to
 //!   start. Proof judges what Plumb runs, and Hinge routes what Proof promoted
 //!   in the same tick.
-//! - The job worker, one job at a time (builds are heavy).
+//! - The job worker, one job at a time (builds are heavy): Press's deploys
+//!   and Draft's onboardings. Draft's pass runs on the tick, after Proof.
 //! - Press's poll of every auto-deploying branch.
 //! - The loopback HTTP endpoint, for GitHub's push webhook.
 //!
@@ -25,7 +26,7 @@ use hold::{Engine, Machine};
 use hush::{HOST, Hush};
 use plumb::{Plumb, Settings};
 use press::Press;
-use press::build::CliBuilder;
+use press::build::{CliBuilder, Railpack};
 use press::git::Git;
 use proof::Proof;
 use tokio::signal::unix::{SignalKind, signal};
@@ -126,6 +127,11 @@ pub fn run(home: &Home) -> Result<()> {
                             Err(e) => warn!("proof pass failed: {e}"),
                         }
                     }
+                    match draft::pass(&canon, config.ai.max_rounds) {
+                        Ok(r) if r != draft::Report::default() => info!(?r, "onboarding"),
+                        Ok(_) => {}
+                        Err(e) => warn!("draft pass failed: {e}"),
+                    }
                     match hinge.pass().await {
                         Ok(_) => last_hinge_error = None,
                         Err(e) => {
@@ -161,9 +167,10 @@ async fn http(listen: String, canon: Arc<Canon>, hush: Arc<Hush>) {
 /// Build a Press for one use, so a GitHub token set with `henry secret set`
 /// applies without a restart.
 fn press(home: &Home, config: &Config, hush: &Hush, canon: Arc<Canon>) -> Result<Press<CliBuilder>> {
-    let token = hush.get(HOST, "GITHUB_TOKEN")?.map(|t| t.expose().to_owned());
+    let program = builder_program(config);
     let builder = CliBuilder {
-        program: builder_program(config),
+        railpack: railpack(home, config, &program),
+        program,
         timeout: Duration::from_secs(config.press.build_timeout_minutes * 60),
     };
     let settings = press::Settings {
@@ -173,7 +180,74 @@ fn press(home: &Home, config: &Config, hush: &Hush, canon: Arc<Canon>) -> Result
         build_retries: 1,
         retry_pause: Duration::from_secs(3),
     };
-    Ok(Press::new(canon, Git { program: "git".into(), token }, builder, settings))
+    Ok(Press::new(canon, git(hush)?, builder, settings))
+}
+
+fn git(hush: &Hush) -> Result<Git> {
+    let token = hush.get(HOST, "GITHUB_TOKEN")?.map(|t| t.expose().to_owned());
+    Ok(Git { program: "git".into(), token })
+}
+
+/// A Draft for one job, with whatever model has a key right now.
+fn draft(
+    home: &Home,
+    config: &Config,
+    hush: Arc<Hush>,
+    canon: Arc<Canon>,
+) -> Result<draft::Draft<CliBuilder, ghost::Model>> {
+    let planner = crate::ai::planner(config, &hush)?;
+    let settings = draft::Settings {
+        checkouts: home.checkouts(),
+        limits: config.limits()?,
+        max_rounds: config.ai.max_rounds,
+        max_tokens: config.ai.max_tokens,
+        ghost: ghost::Settings::default(),
+    };
+    let press = press(home, config, &hush, canon.clone())?;
+    Ok(draft::Draft::new(canon, hush.clone(), press, git(&hush)?, planner, settings))
+}
+
+/// Railpack, when it is installed. Railpack calls `docker` by name, so where
+/// the engine is Podman, Henry's shims directory holds a `docker` that is
+/// Podman.
+fn railpack(home: &Home, config: &Config, engine: &std::path::Path) -> Option<Railpack> {
+    let program = match &config.press.railpack {
+        Some(p) => p.clone(),
+        None => which("railpack").or_else(|| {
+            let brew = std::path::PathBuf::from("/opt/homebrew/bin/railpack");
+            brew.is_file().then_some(brew)
+        })?,
+    };
+    let shims = if engine.file_name().is_some_and(|n| n == "docker") {
+        None
+    } else {
+        let target = if engine.is_absolute() { Some(engine.to_path_buf()) } else { which(&engine.to_string_lossy()) };
+        match target.map(|t| shim(&home.shims(), "docker", &t)) {
+            Some(Ok(dir)) => Some(dir),
+            Some(Err(e)) => {
+                warn!("cannot set up the docker shim for Railpack: {e}");
+                None
+            }
+            None => None,
+        }
+    };
+    Some(Railpack { program, buildkit_image: config.press.buildkit_image.clone(), shims })
+}
+
+fn which(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
+}
+
+/// `dir/name` as a symlink to `target`; returns `dir`.
+fn shim(dir: &std::path::Path, name: &str, target: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let link = dir.join(name);
+    if std::fs::read_link(&link).ok().as_deref() != Some(target) {
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(target, &link)?;
+    }
+    Ok(dir.to_path_buf())
 }
 
 fn builder_program(config: &Config) -> std::path::PathBuf {
@@ -209,6 +283,10 @@ async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
                 Ok(p) => p.run(&job).await.map(|o| o.to_string()).map_err(|e| (e.is_transient(), e.to_string())),
                 Err(e) => Err((false, format!("{e:#}"))),
             },
+            draft::JOB => match draft(&home, &config, hush.clone(), canon.clone()) {
+                Ok(d) => d.run(&job).await.map_err(|e| (e.is_transient(), e.to_string())),
+                Err(e) => Err((false, format!("{e:#}"))),
+            },
             other => Err((false, format!("no handler for jobs of kind `{other}`"))),
         };
         let settled = match outcome {
@@ -224,6 +302,12 @@ async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
             }
             Err((_, e)) => {
                 warn!(job = job.id, kind = %job.kind, "failed: {e}");
+                if job.kind == draft::JOB
+                    && let Some(app) = job.app.as_deref()
+                    && let Err(e) = draft::give_up(&canon, app, &e)
+                {
+                    warn!(app, "cannot mark the onboarding stuck: {e}");
+                }
                 let _ = canon.record(
                     job.app.as_deref(),
                     "job.failed",

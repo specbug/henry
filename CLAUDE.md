@@ -23,13 +23,16 @@ plain words.
 | Press | `crates/press` | git checkouts, image builds, release on push (a Canon job) |
 | Hinge | `crates/hinge` | Caddy routes (admin API) + Cloudflare tunnel ingress and DNS; `henry/src/edge.rs` builds it |
 | Proof | `crates/proof` | the Live gate: staged trials saved in Canon, probes, live watch |
-| Draft / Sound / Ghost | (milestone 6) | onboarding / AI-free scan / the AI |
+| Sound | `crates/sound` | the AI-free repo scan, its skeleton plan, and `Plan::check` |
+| Ghost | `crates/ghost` | provider adapters (`openai.rs` for Meta/Gemini/OpenAI, `claude.rs`), the tool loop (`propose.rs`) |
+| Draft | `crates/draft` | onboarding rounds: a Canon job (`run`) and a tick (`pass`); `henry/src/ai.rs` picks the model |
 | Ark | (milestone 7) | backups |
 | Mend / Bench | (milestone 8) | upkeep / model eval |
 | Glass | (milestone 9) | web UI |
 
-The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, then Hinge on a tick and three side tasks:
-the job worker, Press's poll, and the loopback HTTP endpoint (`henry/src/http.rs`).
+The daemon (`henry/src/daemon.rs`) runs Plumb, Proof, Draft's pass, then Hinge on a tick, and
+three side tasks: the job worker (Press and Draft jobs), Press's poll, and the loopback HTTP
+endpoint (`henry/src/http.rs`).
 
 ## Commands
 
@@ -81,10 +84,23 @@ the engine tests real.
   `set_release_state(.., Live, ..)`; no CLI command, no AI output.
 - **Promotion never recreates the proven container.** Aliases are out of the
   spec hash; Plumb moves them in place with `Runtime::set_aliases`.
-- **A trial survives a restart.** Proof saves its stage after every pass in the
-  `proofs` table; in-memory state is only the live watch's failure counts.
+- **A trial survives a restart, and waits on you.** Proof saves its stage in
+  the `proofs` table (in memory: only the live watch's failure counts). A
+  trial whose app needs a secret is not timed out.
 - **Proof writes Degraded; Plumb does not overwrite it.** Down (containers not
   running) is Plumb's word and outranks Degraded.
+- **Sound runs nothing from the repo** and keeps env var names, never secret
+  values. Ghost sees only files Sound walked, minus what `sound::readable`
+  rejects (`.env`, keys, credentials).
+- **Plans are checked where they are made.** `sound::Plan::check` runs inside
+  Ghost's loop and again in Draft. Files go only under `.henry/`: overlays,
+  stored in Canon and written into each checkout by Press.
+- **Deterministic first.** Draft tries the repo's lease, then Sound's skeleton,
+  then Ghost, one round per plan. A transient provider error spends no round.
+- **Generated secrets.** A random one is made once and kept (a database was
+  initialised with it); a templated one is remade from its parts each round.
+- **An image tag names its recipe.** `henry/<app>-<svc>:<sha12>-<hash>` hashes
+  the build recipe and overlays, so one commit built two ways is two images.
 - **Leases refuse, never ignore.** Every struct in `lease/src/raw.rs` has
   `deny_unknown_fields`. New capabilities get a field and a check, with a
   stable violation `code` that Ghost can act on.
