@@ -35,6 +35,8 @@ pub enum Error {
     NotFound { kind: &'static str, id: i64 },
     #[error("stored {0} is unreadable: {1}")]
     Corrupt(&'static str, String),
+    #[error("no free host port left in the range")]
+    PortsExhausted,
     #[error("the database lock was poisoned by a panic")]
     Poisoned,
     #[error("io: {0}")]
@@ -96,7 +98,7 @@ text_enum! {
         Pending = "pending",
         Building = "building",
         Trial = "trial",
-        Proof = "ordeal",
+        Proof = "proof",
         Live = "live",
         Failed = "failed",
         Superseded = "superseded",
@@ -140,6 +142,14 @@ pub struct Release {
     pub reason: Option<String>,
     pub created_at: i64,
     pub finished_at: Option<i64>,
+}
+
+/// What Plumb should run for one app.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Wanted {
+    pub live: Option<Release>,
+    /// A newer release being tried beside the live one.
+    pub candidate: Option<Release>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -422,6 +432,75 @@ impl Canon {
         rows.map(|r| r?).collect()
     }
 
+    /// The releases Plumb should be running for an app: the live one, and the
+    /// newest release still being tried that is newer than it.
+    pub fn wanted_releases(&self, app: &str) -> Result<Wanted> {
+        let conn = self.conn()?;
+        let a = get_app(&conn, app)?;
+        let live = a.live_release.map(|id| get_release(&conn, id)).transpose()?;
+        let candidate = conn
+            .query_row(
+                &format!(
+                    "SELECT {RELEASE_COLS} FROM releases
+                     WHERE app = ?1 AND state IN ('trial', 'proof') AND id > ?2
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                params![app, a.live_release.unwrap_or(0)],
+                release_row,
+            )
+            .optional()?
+            .transpose()?;
+        Ok(Wanted { live, candidate })
+    }
+
+    // --- host ports ------------------------------------------------------
+
+    /// The host port for one service slot, allocating the lowest free port in
+    /// `range` the first time. The same slot always gets the same port.
+    pub fn port_for(&self, app: &str, service: &str, slot: i64, range: std::ops::Range<u16>) -> Result<u16> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT host_port FROM ports WHERE app = ?1 AND service = ?2 AND slot = ?3",
+                params![app, service, slot],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(p) = existing {
+            return Ok(p as u16);
+        }
+        let used: std::collections::BTreeSet<i64> = {
+            let mut stmt = tx.prepare("SELECT host_port FROM ports")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let port = range.clone().find(|p| !used.contains(&i64::from(*p))).ok_or(Error::PortsExhausted)?;
+        tx.execute(
+            "INSERT INTO ports (app, service, slot, host_port) VALUES (?1, ?2, ?3, ?4)",
+            params![app, service, slot, port],
+        )?;
+        tx.commit()?;
+        Ok(port)
+    }
+
+    /// Release every port of `app` whose slot is not in `keep`.
+    pub fn free_ports(&self, app: &str, keep: &[(String, i64)]) -> Result<usize> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT service, slot FROM ports WHERE app = ?1")?;
+        let held: Vec<(String, i64)> =
+            stmt.query_map([app], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        let mut freed = 0;
+        for (service, slot) in held {
+            if !keep.iter().any(|(s, k)| *s == service && *k == slot) {
+                freed += conn.execute(
+                    "DELETE FROM ports WHERE app = ?1 AND service = ?2 AND slot = ?3",
+                    params![app, service, slot],
+                )?;
+            }
+        }
+        Ok(freed)
+    }
+
     // --- jobs ------------------------------------------------------------
 
     /// Queue a job unless one of the same kind for the same app is already
@@ -570,6 +649,15 @@ impl Canon {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name FROM secrets WHERE scope = ?1 ORDER BY name")?;
         let rows = stmt.query_map([scope], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// When each secret in `scope` was last set. A change here is what makes
+    /// Plumb recreate the containers that use it.
+    pub fn sealed_versions(&self, scope: &str) -> Result<std::collections::BTreeMap<String, i64>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT name, updated_at FROM secrets WHERE scope = ?1")?;
+        let rows = stmt.query_map([scope], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

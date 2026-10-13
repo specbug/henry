@@ -79,6 +79,20 @@ impl Home {
 pub struct Config {
     pub limits: LimitsConfig,
     pub ai: AiConfig,
+    pub engine: EngineConfig,
+}
+
+/// Where the containers run.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EngineConfig {
+    /// A Docker-compatible socket to use as is. Unset: on macOS, the Podman
+    /// machine's socket; elsewhere, the first Podman or Docker socket found.
+    pub socket: Option<std::path::PathBuf>,
+    /// The `podman` binary, for managing the machine on macOS.
+    pub podman: Option<std::path::PathBuf>,
+    /// A Podman machine other than the default one.
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
