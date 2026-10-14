@@ -49,7 +49,23 @@ printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/podman"
 chmod +x "$WORK"/bin/*
 export PATH="$WORK/bin:$PATH"
 
+# On the hosting Mac, cloudflared holds live connections and drains them
+# before it exits; this one takes as long, so a reload meets it still running.
+mkdir -p "$WORK/slow"
+cat >"$WORK/slow/cloudflared" <<'FAKE'
+#!/bin/bash
+trap 'sleep 8; exit 0' TERM
+while :; do sleep 1; done
+FAKE
+chmod +x "$WORK/slow/cloudflared"
+
 agents() { launchctl list | grep -c 'dev\.henry' || true; }
+running() { [[ $(launchctl list "$1" 2>/dev/null) == *'"PID"'* ]]; }
+wait_running() {
+    local i
+    for i in $(seq 20); do running "$1" && return 0; sleep 0.5; done
+    echo "FAIL: $1 is not running" >&2; exit 1
+}
 expect_agents() {
     local n
     n=$(agents)
@@ -78,9 +94,18 @@ done
 [[ $(cat "$HENRY_HOME/tunnel.token") == "$TT" ]] || { echo "FAIL: the tunnel token file is not the token" >&2; exit 1; }
 echo "ok: every secret sealed, and the tunnel token file holds exactly the token"
 
+echo "== a cloudflared that is slow to stop, as one serving traffic is"
+CONF=$("$BIN" where | sed -n 's/^config *//p')
+awk -v line="cloudflared = \"$WORK/slow/cloudflared\"" '{ print } $0 == "[cloudflare]" { print line }' "$CONF" >"$CONF.new"
+mv "$CONF.new" "$CONF"
+"$BIN" install
+expect_agents "the switch to the slow cloudflared"
+wait_running dev.henry.cloudflared
+
 echo "== second run, with Henry's agents up"
 printf 'n\nn\nn\nn\n' | scripts/setup.sh
 expect_agents "a second run"
+wait_running dev.henry.cloudflared
 
 echo "== henry install once more, directly"
 "$BIN" install
