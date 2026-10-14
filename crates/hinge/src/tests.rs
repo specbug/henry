@@ -482,3 +482,74 @@ async fn a_cloudflare_refusal_is_an_error() {
     assert!(unknown_zone.sync_dns(&[]).await.is_err());
     let _ = serde_json::Value::Null;
 }
+
+#[tokio::test]
+async fn a_worker_upload_reaches_cloudflare_as_its_multipart_and_a_gone_script_is_not_an_error() {
+    use crate::workers::{Binding, Edge, Upload};
+
+    #[derive(Default)]
+    struct Seen {
+        upload: Mutex<Option<(String, String)>>,
+        enabled: Mutex<Option<Value>>,
+    }
+    let seen = Arc::new(Seen::default());
+    type S = State<Arc<Seen>>;
+    let app = Router::new()
+        .route("/accounts/acct/workers/subdomain", get(|| async { ok(json!({ "subdomain": "me" })) }))
+        .route(
+            "/accounts/acct/workers/scripts/{script}",
+            put(|State(s): S, headers: axum::http::HeaderMap, body: String| async move {
+                let ct = headers["content-type"].to_str().unwrap().to_owned();
+                *s.upload.lock().unwrap() = Some((ct, body));
+                ok(json!({ "id": "henry-cairn-sync" }))
+            })
+            .delete(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "success": false, "errors": [{ "code": 10007, "message": "This Worker does not exist" }] })),
+                )
+            }),
+        )
+        .route(
+            "/accounts/acct/workers/scripts/{script}/subdomain",
+            post(|State(s): S, axum::Json(v): axum::Json<Value>| async move {
+                *s.enabled.lock().unwrap() = Some(v);
+                ok(json!({}))
+            }),
+        )
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cf = Cloudflare::new(&base, "acct", "tun", vec![], "token");
+
+    assert_eq!(cf.subdomain().await.unwrap(), "me");
+    let upload = Upload {
+        main_module: "henry-entry.js".into(),
+        compatibility_date: "2026-05-01".into(),
+        compatibility_flags: vec![],
+        bindings: vec![
+            Binding::R2 { name: "BUCKET".into(), bucket: "henry".into() },
+            Binding::Secret { name: "SYNC_TOKEN".into(), text: hush::Secret::new("tok") },
+        ],
+        modules: vec![
+            ("src/worker.js".into(), "export default {}\n".into()),
+            ("henry-entry.js".into(), "import w from './src/worker.js';\n".into()),
+        ],
+    };
+    cf.upload("henry-cairn-sync", &upload).await.unwrap();
+    cf.enable_subdomain("henry-cairn-sync").await.unwrap();
+
+    let (ct, body) = seen.upload.lock().unwrap().clone().unwrap();
+    let boundary = ct.strip_prefix("multipart/form-data; boundary=").unwrap();
+    let parts: Vec<&str> = body.split(&format!("--{boundary}")).collect();
+    assert_eq!(parts.len(), 5, "metadata, two modules, and the closing marker: {body}");
+    assert!(parts[1].contains("name=\"metadata\"") && parts[1].contains("\"main_module\":\"henry-entry.js\""));
+    assert!(parts[1].contains("\"bucket_name\":\"henry\"") && parts[1].contains("\"text\":\"tok\""));
+    assert!(parts[2].contains("filename=\"src/worker.js\"") && parts[2].contains("application/javascript+module"));
+    assert!(parts[3].contains("import w from './src/worker.js';"));
+    assert_eq!(parts[4].trim(), "--");
+    assert_eq!(seen.enabled.lock().unwrap().clone().unwrap()["enabled"], true);
+
+    cf.delete("henry-cairn-sync").await.expect("a script already gone is fine");
+}

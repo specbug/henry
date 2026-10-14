@@ -192,6 +192,28 @@ const MIGRATIONS: &[&str] = &[
         dns           TEXT,
         created_at    INTEGER NOT NULL
     ) STRICT;",
+    // 8: Cloudflare Workers. Each release's code for them, and what Hinge
+    // deployed, kept after an app is gone until its script is removed.
+    "CREATE TABLE worker_bundles (
+        release INTEGER NOT NULL REFERENCES releases (id) ON DELETE CASCADE,
+        worker  TEXT NOT NULL,
+        hash    TEXT NOT NULL,
+        bundle  TEXT NOT NULL,
+        PRIMARY KEY (release, worker)
+    ) STRICT;
+
+    CREATE TABLE workers (
+        app         TEXT NOT NULL,
+        worker      TEXT NOT NULL,
+        script      TEXT NOT NULL,
+        url         TEXT,
+        deployed    TEXT,
+        release     INTEGER,
+        deployed_at INTEGER,
+        error       TEXT,
+        failed_at   INTEGER,
+        PRIMARY KEY (app, worker)
+    ) STRICT;",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

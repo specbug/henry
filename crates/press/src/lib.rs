@@ -10,6 +10,7 @@
 
 pub mod build;
 pub mod git;
+pub mod worker;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -232,6 +233,13 @@ impl<B: Builder> Press<B> {
             Ok(images) => images,
             Err(why) => return self.fail(&release, why),
         };
+        // Workers ride with the release: Hinge deploys them from Canon.
+        for w in &lease.workers {
+            match worker::bundle(&dir, w) {
+                Ok((hash, bundle)) => self.canon.put_worker_bundle(release.id, &w.name, &hash, &bundle)?,
+                Err(why) => return self.fail(&release, why),
+            }
+        }
 
         self.canon.set_release_images(release.id, &serde_json::Value::Object(images))?;
         self.canon.supersede_trials(name, release.id)?;
@@ -342,6 +350,7 @@ impl<B: Builder> Press<B> {
             return Ok(Refresh::Unchanged);
         }
         let next = self.canon.create_release(name, &release.commit_sha, &release.lease)?;
+        self.canon.copy_worker_bundles(release.id, next.id)?;
         self.canon.set_release_images(next.id, &serde_json::Value::Object(images))?;
         self.canon.supersede_trials(name, next.id)?;
         let why = format!("base images refreshed: {}", changed.join(", "));

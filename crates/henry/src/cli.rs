@@ -171,6 +171,12 @@ enum Cmd {
         #[arg(long)]
         run: bool,
     },
+    /// The Cloudflare Workers Henry deployed, or copy an old R2 bucket into a
+    /// Worker's corner of Henry's: `henry worker import cairn/sync/BUCKET --from cairn-state`.
+    Worker {
+        #[command(subcommand)]
+        cmd: Option<WorkerCmd>,
+    },
     /// Export or import the master key that seals every secret. Keep a copy
     /// with your restic password: restoring Henry on a new Mac needs both.
     #[command(subcommand)]
@@ -210,6 +216,22 @@ enum ToolsCmd {
     /// Install a tool's newest release and run it from now on. Run
     /// `henry install` afterwards so Caddy's and cloudflared's agents use it.
     Adopt { name: String },
+}
+
+#[derive(Subcommand)]
+enum WorkerCmd {
+    /// Check that Henry's Cloudflare token may deploy Workers into its R2
+    /// bucket. Exits non-zero, naming what to add, if not.
+    Check,
+    /// Copy every object of an R2 bucket into `<app>/<worker>/<binding>` in
+    /// Henry's bucket. The source is only read, and objects already there are
+    /// kept, so it is safe to run again.
+    Import {
+        target: String,
+        /// The bucket to copy from, e.g. `cairn-state`.
+        #[arg(long)]
+        from: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -315,6 +337,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
         Cmd::Backups { app } => backups(&home, &app)?,
         Cmd::Restore { target, snapshot, yes } => restore(&home, &target, snapshot.as_deref(), yes)?,
         Cmd::Key(cmd) => key(&home, cmd)?,
+        Cmd::Worker { cmd } => worker(&home, cmd)?,
         Cmd::Upkeep { cmd } => upkeep(&home, cmd)?,
         Cmd::Host => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -797,6 +820,99 @@ fn bench(home: &Home, run: bool) -> Result<()> {
     }
     for r in runs {
         println!("{:<44} {}/{}  {} tokens  {}", r.model, r.passed, r.total, r.tokens, utc(r.at));
+    }
+    Ok(())
+}
+
+fn worker(home: &Home, cmd: Option<WorkerCmd>) -> Result<()> {
+    let canon = Arc::new(canon(home)?);
+    if matches!(cmd, Some(WorkerCmd::Check)) {
+        return worker_check(home, canon);
+    }
+    let Some(WorkerCmd::Import { target, from }) = cmd else {
+        let deploys = canon.worker_deploys()?;
+        if deploys.is_empty() {
+            println!("no Workers deployed");
+        }
+        for d in deploys {
+            let state = match (&d.error, d.deployed_at) {
+                (Some(e), _) => format!("not deployed: {e}"),
+                (None, Some(at)) => format!("deployed {} from release {}", utc(at), d.release.unwrap_or_default()),
+                (None, None) => "deploying".into(),
+            };
+            println!(
+                "{:<28} {}
+{:<28} {state}",
+                d.script,
+                d.url.as_deref().unwrap_or("-"),
+                ""
+            );
+        }
+        return Ok(());
+    };
+    let parts: Vec<&str> = target.split('/').collect();
+    let [app, name, binding] = parts[..] else {
+        bail!("name it `<app>/<worker>/<binding>`, e.g. cairn/sync/BUCKET");
+    };
+    let lease = lease::Lease::parse(&canon.app(app)?.lease)?;
+    let w = lease.workers.iter().find(|w| w.name == name).with_context(|| format!("`{app}` has no Worker `{name}`"))?;
+    if !w.buckets.iter().any(|b| b == binding) {
+        bail!("Worker `{name}` binds no R2 bucket as `{binding}`; it binds {}", w.buckets.join(", "));
+    }
+    let config = Config::load(&home.config())?;
+    let hush = open_hush(home, canon.clone())?;
+    let cf =
+        crate::edge::cloudflare(&config, &hush)?.context("set [cloudflare] and henry/CLOUDFLARE_API_TOKEN first")?;
+    let bucket = crate::edge::r2_bucket(&config)
+        .context("Henry's R2 bucket is the one [ark] backs up to: set up backups first")?;
+    let prefix = hinge::workers::prefix(app, name, binding);
+    println!("copying {from} into {bucket}/{prefix} through a short-lived Worker...");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let got = rt
+        .block_on(hinge::workers::import(&cf, &from, &bucket, &prefix, None))
+        .map_err(|e| anyhow::anyhow!("the import stopped: {e}"))?;
+    canon.record(
+        Some(app),
+        "worker.imported",
+        &format!("copied {} object(s) from {from} into Worker `{name}`'s {binding}; kept {}", got.copied, got.kept),
+        &serde_json::json!({ "from": from, "worker": name, "binding": binding }),
+    )?;
+    println!("copied {} object(s); {} already there were kept. {from} is untouched.", got.copied, got.kept);
+    Ok(())
+}
+
+/// What Workers need of the Cloudflare token, each checked by a read.
+fn worker_check(home: &Home, canon: Arc<Canon>) -> Result<()> {
+    let config = Config::load(&home.config())?;
+    let hush = open_hush(home, canon)?;
+    let cf =
+        crate::edge::cloudflare(&config, &hush)?.context("set [cloudflare] and henry/CLOUDFLARE_API_TOKEN first")?;
+    let bucket = crate::edge::r2_bucket(&config);
+    let mut checks = vec![
+        ("Account → Workers Scripts → Edit", "/workers/scripts".to_owned()),
+        ("a workers.dev subdomain (Workers & Pages, once)", "/workers/subdomain".to_owned()),
+        ("Account → Workers R2 Storage → Edit", "/r2/buckets".to_owned()),
+    ];
+    if let Some(b) = &bucket {
+        checks.push(("Henry's R2 bucket, from [ark]", format!("/r2/buckets/{b}")));
+    }
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let mut missing = 0;
+    for (what, path) in checks {
+        match rt.block_on(cf.reaches(&path)) {
+            Ok(()) => println!("ok  {what}"),
+            Err(e) => {
+                missing += 1;
+                println!("no  {what}: {}", e.lines().next().unwrap_or_default());
+            }
+        }
+    }
+    if bucket.is_none() {
+        missing += 1;
+        println!("no  Henry's R2 bucket: Workers store in the bucket [ark] backs up to; set up backups on R2");
+    }
+    if missing > 0 {
+        bail!("{missing} thing(s) missing for Workers; add them to the same token on Cloudflare, no new token needed");
     }
     Ok(())
 }

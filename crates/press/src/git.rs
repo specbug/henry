@@ -57,7 +57,11 @@ impl Git {
             // Untrimmed: `show` returns file contents, which must be exact.
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
-            Err(Error::Git(format!("{what}: {}", String::from_utf8_lossy(&out.stderr).trim())))
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            Err(Error::Git(match access_hint(&said, self.token.is_some()) {
+                Some(hint) => format!("{hint} ({what}: {said})"),
+                None => format!("{what}: {said}"),
+            }))
         }
     }
 
@@ -139,6 +143,25 @@ pub fn repo_slug(url: &str) -> Option<String> {
         .then(|| format!("{}/{}", owner.to_lowercase(), repo.to_lowercase()))
 }
 
+/// What a refused read means, in words: GitHub answers a token that may not
+/// see a repo with "Write access to repository not granted", though Henry
+/// only ever reads.
+fn access_hint(said: &str, has_token: bool) -> Option<&'static str> {
+    let refused = ["not granted", "returned error: 403", "Repository not found", "could not read Username"]
+        .iter()
+        .any(|m| said.contains(m));
+    match (refused, has_token) {
+        (false, _) => None,
+        (true, true) => Some(
+            "Henry's GitHub token cannot read this repo (it only reads; GitHub words a token without access as \
+             \"write access not granted\"): add the repo under the token's Repository access on GitHub, then try again",
+        ),
+        (true, false) => {
+            Some("the repo is private and Henry has no GitHub token: run scripts/setup.sh and add one that can read it")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +180,17 @@ mod tests {
         assert_eq!(repo_slug("https://gitlab.com/a/b"), None);
         assert_eq!(repo_slug("https://github.com/a/b/tree/main"), None);
         assert_eq!(repo_slug("https://github.com/a"), None);
+    }
+
+    #[test]
+    fn a_refused_read_says_what_to_do_about_it() {
+        let said = "remote: Write access to repository not granted.\nfatal: unable to access 'https://github.com/me/x/': The requested URL returned error: 403";
+        assert!(access_hint(said, true).unwrap().contains("Repository access"));
+        assert!(
+            access_hint("fatal: could not read Username for 'https://github.com'", false)
+                .unwrap()
+                .contains("no GitHub token")
+        );
+        assert_eq!(access_hint("fatal: couldn't find remote ref main", true), None);
     }
 }

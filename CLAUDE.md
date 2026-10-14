@@ -21,7 +21,7 @@ plain words.
 | Plumb | `crates/plumb` | reconcile loop (`plan.rs` is pure; `lib.rs` acts) |
 | Hold | `crates/hold` | `Runtime` + `Machine` traits, `Engine` (Docker API), `fake::Fake` |
 | Press | `crates/press` | git checkouts, image builds, release on push (a Canon job) |
-| Hinge | `crates/hinge` | Caddy routes (admin API) + Cloudflare tunnel ingress and DNS; `henry/src/edge.rs` builds it |
+| Hinge | `crates/hinge` | Caddy routes (admin API) + Cloudflare tunnel ingress and DNS; `workers.rs` deploys apps' Cloudflare Workers; `henry/src/edge.rs` builds both |
 | Proof | `crates/proof` | the Live gate: staged trials saved in Canon, probes, live watch |
 | Sound | `crates/sound` | the AI-free repo scan, its skeleton plan, and `Plan::check` |
 | Ghost | `crates/ghost` | provider adapters (`openai.rs` for Meta/Gemini/OpenAI, `claude.rs`), the tool loop (`propose.rs`) |
@@ -107,8 +107,18 @@ the engine tests real.
 - **A static site is served as Vercel would.** Sound plans it with
   `.henry/site/` (`site.sh`): `.vercelignore` is applied before the build,
   only the output directory is published, never dotfiles, and the build runs
-  at container start so no image holds a secret. Cloudflare Workers
-  (`wrangler.toml`) stay on Cloudflare; their code is no part of the plan.
+  at container start so no image holds a secret.
+- **Workers run on Cloudflare, deployed by Henry.** A `wrangler.toml` in the
+  repo becomes a lease `[[worker]]`; Press bundles its plain JS modules with
+  each release (no bundler: a package import fails the release), and Hinge
+  deploys it as `henry-<app>-<name>`, following the trial release, else the
+  live one. Its R2 bindings are Henry's bucket (the one `[ark]` uses),
+  scoped by `scope.js` to `apps/<app>/<worker>/<binding>/`: the bucket never
+  reaches the Worker's code. Sound links a Worker's secret to the app's
+  (`CAIRN_SYNC_TOKEN` for `SYNC_TOKEN`), which Draft generates, and Hinge
+  sets the app's URL secret after deploying. Henry removes only scripts
+  Canon's `workers` table says it made; `henry worker import` copies an old
+  bucket in and never overwrites or deletes.
 - **Plans are checked where they are made.** `sound::Plan::check` runs inside
   Ghost's loop and again in Draft. Files go only under `.henry/`: overlays,
   stored in Canon and written into each checkout by Press.

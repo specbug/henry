@@ -387,3 +387,24 @@ async fn a_refresh_releases_only_when_a_base_image_moved() {
 
     assert_eq!(w.press.refresh("draw").await.unwrap(), Refresh::Busy, "one trial at a time");
 }
+
+#[tokio::test]
+async fn a_release_carries_its_workers_code_or_fails_saying_why() {
+    let w = world();
+    let lease = format!("{LEASE}\n[[worker]]\nname = \"sync\"\ndir = \"worker\"\n");
+    w.push(&[
+        ("Dockerfile", "FROM scratch\n"),
+        ("lease.toml", &lease),
+        ("worker/wrangler.toml", "name = \"draw-sync\"\nmain = \"index.js\"\n"),
+        ("worker/index.js", "export default {}\n"),
+    ]);
+    let Outcome::Released(id) = w.deploy().await else { panic!("expected a release") };
+    let bundles = w.canon.worker_bundles(id).unwrap();
+    assert_eq!((bundles.len(), bundles[0].worker.as_str()), (1, "sync"));
+    assert_eq!(bundles[0].bundle["modules"]["index.js"], "export default {}\n");
+
+    w.push(&[("worker/index.js", "import { Hono } from 'hono';\nexport default new Hono();\n")]);
+    let Outcome::Failed(id, why) = w.deploy().await else { panic!("expected a failure") };
+    assert!(why.contains("imports hono"), "{why}");
+    assert_eq!(w.canon.release(id).unwrap().state, ReleaseState::Failed);
+}

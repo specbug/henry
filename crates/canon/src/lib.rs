@@ -13,6 +13,7 @@ mod ark;
 mod draft;
 mod mend;
 mod schema;
+mod workers;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -28,6 +29,7 @@ pub use mend::{BenchRun, Tool, Upkeep};
 pub use rusqlite;
 pub use schema::LATEST as SCHEMA_VERSION;
 pub use serde_json;
+pub use workers::{WorkerBundle, WorkerDeploy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

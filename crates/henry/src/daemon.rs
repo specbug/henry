@@ -56,6 +56,7 @@ pub fn run(home: &Home) -> Result<()> {
 
     crate::edge::prepare(home, &config, &hush)?;
     let mut hinge = crate::edge::hinge(&config, canon.clone(), &hush)?;
+    let mut workers = crate::edge::workers(&config, canon.clone(), hush.clone())?;
     let mut last_hinge_error: Option<String> = None;
 
     let version = env!("CARGO_PKG_VERSION");
@@ -93,6 +94,10 @@ pub fn run(home: &Home) -> Result<()> {
                         match crate::edge::hinge(&config, canon.clone(), &hush) {
                             Ok(h) => hinge = h,
                             Err(e) => warn!("keeping the old routing setup: {e:#}"),
+                        }
+                        match crate::edge::workers(&config, canon.clone(), hush.clone()) {
+                            Ok(w) => workers = w,
+                            Err(e) => warn!("keeping the old Workers setup: {e:#}"),
                         }
                         // Glass's settings: the endpoint comes back up with them.
                         side[0].abort();
@@ -156,6 +161,12 @@ pub fn run(home: &Home) -> Result<()> {
                         Ok(q) if !q.is_empty() => info!(?q, "upkeep queued"),
                         Ok(_) => {}
                         Err(e) => warn!("cannot schedule upkeep: {e}"),
+                    }
+                    // Workers before routes: a site on trial waits for its Worker's URL.
+                    if let Some(w) = &workers
+                        && let Err(e) = w.pass().await
+                    {
+                        warn!("Workers not reconciled: {e}");
                     }
                     match hinge.pass().await {
                         Ok(_) => last_hinge_error = None,

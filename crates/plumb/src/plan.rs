@@ -143,7 +143,20 @@ pub fn plan_app(canon: &Canon, hush: &Hush, app: &App, settings: &Settings) -> R
 
     let provision = hush.provision(&app.name, &needed)?;
     if !provision.missing.is_empty() {
-        plan.missing_secrets = provision.missing;
+        // A Worker's URL is Henry's to set, once the Worker is deployed.
+        plan.missing_secrets = provision
+            .missing
+            .into_iter()
+            .map(|name| {
+                match leases.iter().flat_map(|l| &l.workers).find(|w| w.url.as_deref() == Some(name.as_str())) {
+                    Some(w) => format!(
+                        "{name} (Henry sets it once Worker `{}` is deployed; `henry worker` says why not)",
+                        w.name
+                    ),
+                    None => name,
+                }
+            })
+            .collect();
         return Ok(plan);
     }
     let secrets: BTreeMap<&str, &str> = provision.env.iter().map(|(n, v)| (n.as_str(), v.expose())).collect();

@@ -448,3 +448,30 @@ fn an_adoption_remembers_the_record_its_cutover_replaced() {
     assert_eq!((a.cutover_at, a.dns), (None, None));
     assert_eq!(db.events(Some("odyssey"), 1).unwrap()[0].kind, "adopt.back");
 }
+
+#[test]
+fn a_workers_bundle_rides_with_its_release_and_its_deploy_outlives_the_app() {
+    let db = db_with("cairn", "cairn.example.com");
+    let r = db.create_release("cairn", "abc", "lease").unwrap();
+    let bundle = serde_json::json!({ "main": "worker.js", "modules": { "worker.js": "export default {}" } });
+    db.put_worker_bundle(r.id, "sync", "h1", &bundle).unwrap();
+    let next = db.create_release("cairn", "abc", "lease").unwrap();
+    db.copy_worker_bundles(r.id, next.id).unwrap();
+    assert_eq!(db.worker_bundles(next.id).unwrap(), db.worker_bundles(r.id).unwrap());
+    assert_eq!(db.worker_bundles(next.id).unwrap()[0].bundle, bundle);
+
+    db.claim_worker("cairn", "sync", "henry-cairn-sync").unwrap();
+    db.set_worker_failed("cairn", "sync", "403").unwrap();
+    db.set_worker_failed("cairn", "sync", "403").unwrap();
+    let failures = db.events(Some("cairn"), 50).unwrap().iter().filter(|e| e.kind == "worker.failed").count();
+    assert_eq!(failures, 1, "the same failure is recorded once");
+    db.set_worker_deployed("cairn", "sync", "https://henry-cairn-sync.me.workers.dev", "h1", next.id).unwrap();
+    let d = &db.worker_deploys().unwrap()[0];
+    assert_eq!((d.error.as_deref(), d.deployed.as_deref(), d.release), (None, Some("h1"), Some(next.id)));
+
+    db.remove_app("cairn").unwrap();
+    assert!(db.worker_bundles(next.id).unwrap().is_empty(), "bundles go with the app's releases");
+    assert_eq!(db.worker_deploys().unwrap().len(), 1, "the script is still on Cloudflare until Hinge removes it");
+    db.forget_worker("cairn", "sync").unwrap();
+    assert!(db.worker_deploys().unwrap().is_empty());
+}
