@@ -102,6 +102,15 @@ impl Fake {
         });
     }
 
+    /// The container is frozen, as Ark does for the moment of a backup.
+    pub fn pause(&self, name: &str, paused: bool) {
+        self.with(|i| {
+            if let Some(c) = i.containers.values_mut().find(|c| c.spec.name == name) {
+                c.state = if paused { State::Paused } else { State::Running };
+            }
+        });
+    }
+
     /// The engine restarts the container after it crashes: it keeps running,
     /// but its restart count goes up.
     pub fn bounce(&self, name: &str) {

@@ -221,6 +221,26 @@ async fn a_crashed_container_is_started_again() {
 }
 
 #[tokio::test]
+async fn a_container_paused_for_a_backup_is_left_alone() {
+    let w = world();
+    let r = w.trying();
+    w.canon.set_release_state(r, ReleaseState::Live, None).unwrap();
+    w.plumb.pass().await.unwrap();
+    w.fake.take_ops();
+
+    // Ark freezes the database for a moment while it copies the volume.
+    w.fake.pause("draw-db", true);
+    let report = w.plumb.pass().await.unwrap();
+    assert!(report.started.is_empty() && report.recreated.is_empty() && report.failed.is_empty(), "{report:?}");
+    assert!(w.fake.take_ops().iter().all(|op| !op.contains("draw-db")), "nothing is done to it");
+    assert_eq!(w.status(), Status::Live, "paused is not down");
+
+    w.fake.pause("draw-db", false);
+    w.plumb.pass().await.unwrap();
+    assert_eq!(w.status(), Status::Live);
+}
+
+#[tokio::test]
 async fn a_new_secret_value_recreates_its_containers() {
     let w = world();
     let r = w.trying();

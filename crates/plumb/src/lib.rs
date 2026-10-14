@@ -292,6 +292,11 @@ impl<R: Runtime, M: Machine> Plumb<R, M> {
         report: &mut Report,
     ) -> Result<bool> {
         let name = &planned.spec.name;
+        // Paused is Ark freezing it for the moment of a backup, and Ark always
+        // unpauses. It is up; starting or replacing it now would only fail.
+        if found.is_some_and(|c| c.state == State::Paused) {
+            return Ok(true);
+        }
         let hash = planned.spec.hash();
         let current = found.filter(|c| c.spec_hash() == Some(hash.as_str()));
         if is_current(planned, found) {
