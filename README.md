@@ -78,6 +78,16 @@ tried, checks it, builds it and puts it on trial:
    `go.mod`, `Cargo.toml`, …) it asks Railpack to build. An app that uses
    Postgres or Redis gets its own, with a generated password and URL. Sound
    says where it guessed.
+
+   A static site (a `vercel.json`, a Vite or Create React App build, or a
+   bare `index.html`) is served by Caddy from an image Henry writes, as
+   Vercel would serve it: `.vercelignore` is applied before anything runs,
+   and only the output directory is published, never dotfiles, `.git` or
+   `node_modules`. Its build command runs as the container starts, with the
+   app's secrets, as a Vercel build sees its env; the env vars that build
+   reads are secrets the app waits on. A Cloudflare Worker in the repo (a
+   `wrangler.toml`) stays on Cloudflare, deployed with wrangler; Henry
+   neither builds nor runs it.
 3. **Ghost's plan.** When Sound's draft fails, or there is nothing to draft
    from, Ghost reads the repo (list, read, search; never `.env` files or keys)
    and proposes a lease, and a Dockerfile under `.henry/` if one is needed.

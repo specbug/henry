@@ -104,6 +104,11 @@ the engine tests real.
   rejects (`.env`, keys, credentials). With a compose file, compose decides
   which service gets which variable; Draft fills `${VAR:-default}` secrets
   as compose would (`draft::interpolate`).
+- **A static site is served as Vercel would.** Sound plans it with
+  `.henry/site/` (`site.sh`): `.vercelignore` is applied before the build,
+  only the output directory is published, never dotfiles, and the build runs
+  at container start so no image holds a secret. Cloudflare Workers
+  (`wrangler.toml`) stay on Cloudflare; their code is no part of the plan.
 - **Plans are checked where they are made.** `sound::Plan::check` runs inside
   Ghost's loop and again in Draft. Files go only under `.henry/`: overlays,
   stored in Canon and written into each checkout by Press.

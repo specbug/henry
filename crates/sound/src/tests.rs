@@ -402,3 +402,131 @@ fn a_database_url_with_credentials_stays_a_secret() {
     let s = scan(&r).skeleton(&ask()).unwrap();
     assert!(!s.plan.lease.contains("hunter2"), "{}", s.plan.lease);
 }
+
+/// cairn's shape: a site Vercel builds from `vercel.json`, a build script
+/// that reads two env vars, a `.vercelignore`, and a Cloudflare Worker.
+pub(crate) const VERCEL_SITE: &[(&str, &str)] = &[
+    ("index.html", "<!doctype html><script src=\"static/config.js\"></script>\n"),
+    ("static/app.js", "console.log('app')\n"),
+    ("vercel.json", r#"{"buildCommand": "node scripts/gen-config.js", "outputDirectory": ".", "framework": null}"#),
+    (".vercelignore", "notes.md\nworker/\nCLAUDE.md\n*.original.md\n"),
+    (
+        "scripts/gen-config.js",
+        "const fs = require('fs');\nconst url = process.env.SITE_SYNC_URL || '';\nconst token = process.env.SITE_SYNC_TOKEN || '';\nfs.writeFileSync('static/config.js', 'window.CONFIG = ' + JSON.stringify({ url, token }) + ';\\n');\n",
+    ),
+    ("scripts/parse.js", "const start = process.env.SITE_PREP_START;\n"),
+    ("notes.md", "private\n"),
+    ("CLAUDE.md", "private\n"),
+    ("draft.original.md", "private\n"),
+    (".env", "SITE_SYNC_TOKEN=never-read\n"),
+    ("worker/wrangler.toml", "name = \"sync\"\nmain = \"worker.js\"\n"),
+    ("worker/package.json", r#"{"devDependencies": {"wrangler": "^4"}, "dependencies": {"pg": "^8"}}"#),
+    ("worker/worker.js", "export default { fetch(req, env) { return new Response(env.SYNC_TOKEN) } }\n"),
+];
+
+#[test]
+fn a_vercel_site_is_served_from_its_files_and_its_worker_left_to_cloudflare() {
+    let r = repo(VERCEL_SITE);
+    let survey = scan(&r);
+    assert_eq!(survey.workers, ["worker"]);
+    assert!(survey.stacks.is_empty(), "a Worker's manifest is no app to build: {:?}", survey.stacks);
+    assert!(survey.needs.is_empty(), "nor are its dependencies the app's: {:?}", survey.needs);
+    let site = survey.site.as_ref().unwrap();
+    assert_eq!((site.from.as_str(), site.output.as_str()), ("vercel.json", "."));
+    assert_eq!(site.build.as_deref(), Some("node scripts/gen-config.js"));
+
+    let s = survey.skeleton(&ask()).unwrap();
+    let lease = lease_of(&s);
+    let web = lease.service("web").unwrap();
+    assert_eq!(web.build, Build::Dockerfile { path: ".henry/site/Dockerfile".into(), context: ".".into() });
+    assert_eq!((web.port, &web.health), (Some(8080), &Health::Http { path: "/".into() }));
+    assert_eq!(web.public.as_ref().unwrap().hostname, "draw.example.com");
+    // What the build reads, it waits on; what only a dev script reads, it does not.
+    assert_eq!(web.secrets, ["SITE_SYNC_TOKEN", "SITE_SYNC_URL"]);
+    let paths: Vec<&str> = s.plan.files.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(paths, [".henry/site/Dockerfile", ".henry/site/build.sh", ".henry/site/site.sh"]);
+    let docker = &s.plan.files[0].1;
+    assert!(docker.contains("FROM node:22-alpine") && docker.contains("ENV SITE_OUT=."), "{docker}");
+    assert!(!docker.contains("install.sh"), "no package.json, nothing to install: {docker}");
+    assert!(s.plan.files[1].1.contains("\nnode scripts/gen-config.js\n"));
+    assert!(s.gaps.iter().any(|g| g.contains("`worker` is a Cloudflare Worker")), "{:?}", s.gaps);
+    assert!(s.gaps.iter().any(|g| g.contains("SITE_PREP_START") && g.contains("left unset")), "{:?}", s.gaps);
+    assert!(survey.brief().contains("## Cloudflare Workers"));
+}
+
+#[test]
+fn a_plain_index_html_is_published_as_is() {
+    let r = repo(&[("index.html", "<h1>hi</h1>\n"), ("about/index.html", "<h1>about</h1>\n")]);
+    let s = scan(&r).skeleton(&ask()).unwrap();
+    let web = lease_of(&s).service("web").unwrap().clone();
+    assert!(web.secrets.is_empty());
+    let docker = &s.plan.files.iter().find(|(p, _)| p.ends_with("Dockerfile")).unwrap().1;
+    assert!(docker.contains("FROM caddy:2-alpine") && !docker.contains("node"), "{docker}");
+    assert!(docker.contains("SITE_OUT=. sh /src/.henry/site/site.sh publish /site"), "{docker}");
+    assert!(s.gaps.is_empty(), "nothing guessed: {:?}", s.gaps);
+}
+
+#[test]
+fn a_vite_app_installs_from_its_lockfile_and_builds_with_its_env() {
+    let r = repo(&[
+        ("package.json", r#"{"scripts": {"dev": "vite", "build": "vite build"}, "devDependencies": {"vite": "^7"}}"#),
+        ("package-lock.json", "{}"),
+        ("index.html", "<script type=module src=/src/main.js></script>\n"),
+        ("src/main.js", "fetch(import.meta.env.VITE_API_URL)\n"),
+    ]);
+    let survey = scan(&r);
+    let site = survey.site.as_ref().unwrap();
+    assert_eq!((site.from.as_str(), site.output.as_str()), ("vite", "dist"));
+    let s = survey.skeleton(&ask()).unwrap();
+    assert_eq!(lease_of(&s).service("web").unwrap().secrets, ["VITE_API_URL"]);
+    let file = |name: &str| &s.plan.files.iter().find(|(p, _)| p.ends_with(name)).unwrap().1;
+    assert!(file("install.sh").contains("\nnpm ci\n"));
+    assert!(file("build.sh").contains("\nnpm run build\n"));
+    assert!(
+        file("Dockerfile").contains("RUN sh .henry/site/install.sh\nENV SITE_OUT=dist\n"),
+        "{}",
+        file("Dockerfile")
+    );
+}
+
+#[test]
+fn an_app_that_serves_itself_is_not_a_static_site() {
+    let server = repo(&[
+        ("package.json", r#"{"scripts": {"start": "node server.js"}, "dependencies": {"express": "^5"}}"#),
+        ("index.html", "<h1>hi</h1>\n"),
+        ("vercel.json", "{}"),
+    ]);
+    let survey = scan(&server);
+    assert_eq!(survey.site, None);
+    let s = survey.skeleton(&ask()).unwrap();
+    assert_eq!(lease_of(&s).service("web").unwrap().build, Build::Railpack { path: ".".into() });
+
+    let next = repo(&[("vercel.json", r#"{"framework": "nextjs"}"#), ("index.html", "")]);
+    assert_eq!(scan(&next).site, None, "Vercel runs a Next.js app as a server");
+    let python = repo(&[("requirements.txt", "flask\n"), ("index.html", "")]);
+    assert_eq!(scan(&python).site, None);
+}
+
+#[test]
+fn a_site_may_publish_only_a_directory_inside_the_repo() {
+    for out in ["../etc", "/etc", "a b", "x/../../y"] {
+        let r = repo(&[("vercel.json", &format!(r#"{{"outputDirectory": "{out}"}}"#)), ("index.html", "")]);
+        assert_eq!(scan(&r).site, None, "{out}");
+    }
+    let r = repo(&[("vercel.json", r#"{"outputDirectory": "./public/"}"#), ("public/index.html", "")]);
+    assert_eq!(scan(&r).site.unwrap().output, "public");
+}
+
+#[test]
+fn a_worker_beside_an_app_is_left_out_of_its_plan() {
+    let r = repo(&[
+        ("package.json", r#"{"scripts": {"start": "node index.js"}}"#),
+        ("sync/wrangler.jsonc", "{}"),
+        ("sync/package.json", r#"{"dependencies": {"pg": "^8"}}"#),
+        ("sync/index.js", "const u = process.env.SYNC_DB_URL;\n"),
+    ]);
+    let survey = scan(&r);
+    assert_eq!(survey.workers, ["sync"]);
+    assert_eq!(survey.stacks.len(), 1);
+    assert!(survey.needs.is_empty() && !survey.env.contains_key("SYNC_DB_URL"), "{:?} {:?}", survey.needs, survey.env);
+}

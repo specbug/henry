@@ -104,7 +104,7 @@ async fn copying_sounds_draft_is_not_enough() {
     let failed: Vec<&str> = report.verdicts.iter().filter(|v| !v.passed()).map(|v| v.case.as_str()).collect();
     assert!(failed.contains(&"express-healthz"), "Sound guesses GET /: {}", report.summary());
     assert!(failed.contains(&"go-fixed-port"), "Sound guesses $PORT: {}", report.summary());
-    assert!(failed.contains(&"static-site"), "Sound has nothing to build: {}", report.summary());
+    assert!(!failed.contains(&"static-site"), "Sound serves a bare index.html itself: {}", report.summary());
     assert!(report.passed() < report.verdicts.len());
 }
 
