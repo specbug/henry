@@ -139,7 +139,10 @@ pub fn install(agent: &Agent) -> Result<PathBuf> {
 
     let domain = gui_domain()?;
     // Not loaded yet is fine; anything else surfaces at bootstrap.
-    let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{}", agent.label)]).status();
+    let _ = Command::new("launchctl")
+        .args(["bootout", &format!("{domain}/{}", agent.label)])
+        .stderr(std::process::Stdio::null())
+        .status();
     let status = Command::new("launchctl").args(["bootstrap", &domain]).arg(&path).status()?;
     if !status.success() {
         bail!("launchctl bootstrap {domain} {} failed ({status})", path.display());
