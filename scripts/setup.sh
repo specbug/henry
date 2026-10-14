@@ -17,7 +17,8 @@ note() { printf '  %s\n' "$*"; }
 die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 ask() { local a; read -r -p "  $1${2:+ [$2]}: " a; printf '%s' "${a:-${2:-}}"; }
 yes_no() { local a; read -r -p "  $1 [y/N] " a; [[ $a == [yY]* ]]; }
-hidden() { local v; read -r -s -p "  $1: " v; echo >&2; printf '%s' "$v"; }
+hidden() { local v; read -r -s -p "  $1 (hidden as you paste): " v; echo >&2; printf '%s' "$v"; }
+steps() { local i=1 line; for line in "$@"; do printf '    %d. %s\n' "$i" "$line"; i=$((i + 1)); done; }
 
 # --- what this Mac needs -------------------------------------------------------
 
@@ -51,8 +52,11 @@ bold "Configuration: $CONF"
 if has cloudflare; then
     note "[cloudflare] is set; keeping it"
 else
-    note "From the Cloudflare dashboard: the account id (on any domain's overview page)"
-    note "and the tunnel id (Zero Trust → Networks → Tunnels)."
+    note "A tunnel for Henry, if you have not made one:"
+    steps "dash.cloudflare.com → Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared." \
+        "Name it henry and save. Copy the token in the install command (the string after --token)." \
+        "Skip installing a connector and skip adding routes: Henry does both."
+    note "Account id: on the right of any domain's Overview page. Tunnel id: in the tunnels list."
     account=$(ask "Account id")
     tunnel=$(ask "Tunnel id")
     zone=$(ask "Your domain on Cloudflare, e.g. example.com")
@@ -80,7 +84,11 @@ bold "Cloudflare API token"
 if is_set CLOUDFLARE_API_TOKEN; then
     note "already set; keeping it"
 else
-    note "Needs: Cloudflare Tunnel Edit on the account; DNS Edit and Zone Read on $ZONE."
+    note "Create one at dash.cloudflare.com/profile/api-tokens → Create Token → Custom token:"
+    steps "Policy on the entire account: Cloudflare Tunnel (listed as Argo Tunnel) → Edit." \
+        "Add a policy on the zone $ZONE: DNS → Edit, and Zone → Read." \
+        "Create, and copy the token: it is shown once."
+    note "Each permission is checked against Cloudflare before the token is kept."
     while :; do
         T=$(hidden "API token")
         fails=""
@@ -105,7 +113,8 @@ bold "Tunnel token"
 if is_set CLOUDFLARE_TUNNEL_TOKEN; then
     note "already set; keeping it"
 else
-    note "Zero Trust → Networks → Tunnels → your tunnel → Configure: the long string after --token."
+    note "The token from when you made the tunnel. To see it again: Zero Trust → Networks →"
+    note "Tunnels → henry → Configure; it is the long string after --token in the install command."
     TT=$(hidden "Tunnel token")
     [[ -n $TT ]] || die "No token given."
     # The token is base64 JSON naming its tunnel: catch one from another tunnel.
@@ -121,7 +130,24 @@ bold "GitHub"
 if is_set GITHUB_TOKEN; then
     note "a token is set; keeping it"
 elif yes_no "Are any of your repos private (Henry then needs a read token)?"; then
-    seal GITHUB_TOKEN "$(hidden "GitHub token with read access to those repos")"
+    note "Create a fine-grained token that can only read those repos:"
+    steps "github.com/settings/personal-access-tokens/new; name it henry; pick an expiry." \
+        "Repository access: Only select repositories → the ones Henry will host." \
+        "Repository permissions → Contents: Read-only. Leave everything else at No access." \
+        "Generate token, and copy it (github_pat_…): it is shown once."
+    while :; do
+        G=$(hidden "GitHub token")
+        # Any valid token may read the rate limit; a bad one gets 401.
+        code=$(printf 'header = "Authorization: Bearer %s"\n' "$G" |
+            curl -sS -o /dev/null -w '%{http_code}' -K - https://api.github.com/rate_limit || true)
+        if [[ $code == 200 ]]; then
+            seal GITHUB_TOKEN "$G"
+            break
+        fi
+        note "GitHub did not accept that token (HTTP $code)."
+        yes_no "Try another token?" || die "Stopped; no GitHub token was kept."
+    done
+    unset G
 else
     note "public repos need no token"
 fi
@@ -132,8 +158,10 @@ bold "Backups to R2"
 if has ark; then
     note "[ark] is set; keeping it"
 elif yes_no "Set up backups now? (You can run this script again later to add them.)"; then
-    note "In Cloudflare: R2 → create a bucket, then Manage API tokens → Object Read & Write"
-    note "on that bucket only. It shows an Access Key ID and a Secret Access Key once."
+    steps "dash.cloudflare.com → R2 Object Storage → Create bucket, e.g. henry-backups." \
+        "R2 Object Storage → Manage API tokens → Create API token." \
+        "Permissions: Object Read & Write. Apply to specific buckets only → that bucket." \
+        "Create. Copy the Access Key ID and the Secret Access Key: they are shown once."
     bucket=$(ask "Bucket" "henry-backups")
     printf '\n[ark]\nrepository = "s3:https://%s.r2.cloudflarestorage.com/%s/henry"\n' "$ACCOUNT" "$bucket" >>"$CONF"
     brew list --formula restic >/dev/null 2>&1 || brew install --quiet restic
