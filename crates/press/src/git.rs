@@ -58,10 +58,10 @@ impl Git {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
             let said = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-            Err(Error::Git(match access_hint(&said, self.token.is_some()) {
-                Some(hint) => format!("{hint} ({what}: {said})"),
-                None => format!("{what}: {said}"),
-            }))
+            Err(match access_hint(&said, self.token.is_some()) {
+                Some(hint) => Error::Denied(format!("{hint} ({what}: {said})")),
+                None => Error::Git(format!("{what}: {said}")),
+            })
         }
     }
 
@@ -192,5 +192,12 @@ mod tests {
                 .contains("no GitHub token")
         );
         assert_eq!(access_hint("fatal: couldn't find remote ref main", true), None);
+    }
+
+    #[test]
+    fn a_refusal_is_never_mistaken_for_the_network() {
+        let denied = crate::Error::transient(crate::Error::Denied("no access".into()));
+        assert!(!denied.is_transient(), "waiting does not make GitHub say yes");
+        assert!(crate::Error::transient(crate::Error::Git("timed out".into())).is_transient());
     }
 }
