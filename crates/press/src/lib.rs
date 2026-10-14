@@ -33,6 +33,9 @@ pub enum Error {
     Transient(String),
     #[error("git: {0}")]
     Git(String),
+    /// GitHub refused: no wait makes it read, so it is never retried.
+    #[error("{0}")]
+    Denied(String),
     #[error("{0}")]
     Build(String),
     #[error("{0}")]
