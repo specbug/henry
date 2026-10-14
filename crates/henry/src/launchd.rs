@@ -9,7 +9,8 @@
 //! replace itself without the edge noticing.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -138,16 +139,59 @@ pub fn install(agent: &Agent) -> Result<PathBuf> {
     std::fs::rename(&tmp, &path)?;
 
     let domain = gui_domain()?;
+    let target = format!("{domain}/{}", agent.label);
     // Not loaded yet is fine; anything else surfaces at bootstrap.
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("{domain}/{}", agent.label)])
-        .stderr(std::process::Stdio::null())
-        .status();
-    let status = Command::new("launchctl").args(["bootstrap", &domain]).arg(&path).status()?;
-    if !status.success() {
-        bail!("launchctl bootstrap {domain} {} failed ({status})", path.display());
+    let old = print(&target).as_deref().and_then(pid_in);
+    let _ = Command::new("launchctl").args(["bootout", &target]).stderr(Stdio::null()).status();
+    // bootout returns before a running agent has stopped (cloudflared drains
+    // its connections first), and loading it again meanwhile fails with
+    // "Input/output error". Wait for the agent and its process to be gone;
+    // launchd kills a process that takes over 20s.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while (print(&target).is_some() || old.is_some_and(alive)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
     }
+    retry(10, Duration::from_secs(1), || {
+        let out = Command::new("launchctl").args(["bootstrap", &domain]).arg(&path).output()?;
+        if out.status.success() {
+            return Ok(None);
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        Ok(Some(format!("{} ({})", err.lines().next().unwrap_or("no output").trim(), out.status)))
+    })
+    .with_context(|| format!("launchctl bootstrap {domain} {}", path.display()))?;
     Ok(path)
+}
+
+/// What launchd says of `target` (`gui/<uid>/<label>`), if it has it loaded.
+fn print(target: &str) -> Option<String> {
+    let out = Command::new("launchctl").args(["print", target]).stderr(Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The running process in `launchctl print` output.
+fn pid_in(print: &str) -> Option<u32> {
+    print.lines().find_map(|l| l.trim().strip_prefix("pid = ")?.trim().parse().ok())
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+/// Run `step` until it reports no failure (`None`), up to `attempts` times,
+/// pausing between tries. The last failure is the error.
+fn retry(attempts: u32, pause: Duration, mut step: impl FnMut() -> Result<Option<String>>) -> Result<()> {
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match step()? {
+            None => return Ok(()),
+            Some(why) => last = why,
+        }
+        if attempt < attempts {
+            std::thread::sleep(pause);
+        }
+    }
+    bail!("failed {attempts} times; last: {last}")
 }
 
 pub fn uninstall(label: &str) -> Result<()> {
@@ -178,6 +222,34 @@ fn xml(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_running_process_is_read_from_launchctl_print() {
+        let print = "gui/501/dev.henry.cloudflared = {\n\tactive count = 1\n\tstate = running\n\tpid = 4242\n\tlast exit code = (never exited)\n}\n";
+        assert_eq!(pid_in(print), Some(4242));
+        assert_eq!(pid_in("gui/501/dev.henry = {\n\tstate = not running\n}\n"), None);
+    }
+
+    #[test]
+    fn a_failed_load_is_tried_again_and_the_last_reason_is_kept() {
+        let mut tries = 0;
+        retry(5, Duration::ZERO, || {
+            tries += 1;
+            Ok((tries < 3).then(|| "Bootstrap failed: 5: Input/output error".to_owned()))
+        })
+        .unwrap();
+        assert_eq!(tries, 3, "stops at the first success");
+
+        let mut tries = 0;
+        let err = retry(4, Duration::ZERO, || {
+            tries += 1;
+            Ok(Some(format!("try {tries}")))
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(tries, 4);
+        assert!(err.contains("failed 4 times") && err.contains("try 4"), "{err}");
+    }
 
     fn home() -> Home {
         Home { root: "/Users/me/Library/Application Support/Henry".into() }

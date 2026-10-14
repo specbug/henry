@@ -28,9 +28,14 @@ for tool in brew cargo git podman curl; do
 done
 
 bold "Building Henry"
-cargo install --path crates/henry --locked --quiet
-H=$(command -v henry || true)
-[[ -n $H ]] || H="$HOME/.cargo/bin/henry"
+if [[ -n ${HENRY_BIN:-} ]]; then
+    # A binary already built, e.g. by CI or by scripts/test-setup.sh.
+    H=$HENRY_BIN
+else
+    cargo install --path crates/henry --locked --quiet
+    H=$(command -v henry || true)
+    [[ -n $H ]] || H="$HOME/.cargo/bin/henry"
+fi
 [[ -x $H ]] || die "henry was built but is not at $H; is ~/.cargo/bin on your PATH?"
 note "$("$H" --version) at $H"
 
@@ -52,7 +57,7 @@ HOME_DIR=$("$H" where | sed -n 's/^home *//p')
 mkdir -p "$(dirname "$CONF")"
 touch "$CONF"
 has() { grep -q "^\[$1\]" "$CONF"; }
-value() { sed -n "s/^$1 *= *\"\(.*\)\"/\1/p" "$CONF" | head -1; }
+value() { sed -n "s/^$1 *= *\"\(.*\)\"/\1/p" "$CONF" | sed -n 1p; }
 
 bold "Configuration: $CONF"
 if has cloudflare; then
@@ -75,11 +80,14 @@ if ! has press; then
 fi
 ACCOUNT=$(value account)
 TUNNEL=$(value tunnel)
-ZONE=$(sed -n 's/^zones *= *\["\([^"]*\)".*/\1/p' "$CONF" | head -1)
+ZONE=$(sed -n 's/^zones *= *\["\([^"]*\)".*/\1/p' "$CONF" | sed -n 1p)
 
 # --- secrets ------------------------------------------------------------------
 
-is_set() { "$H" secret list henry 2>/dev/null | grep -qx "$1"; }
+# Henry's sealed names, read once. If they cannot be read, stop: a secret
+# that is set must never look unset, or a re-run would ask for it again.
+SEALED=$("$H" secret list henry) || die "Cannot list Henry's secrets (the error is above); nothing was changed."
+is_set() { grep -qx "$1" <<<"$SEALED"; }
 
 # Whether to (re)enter a secret: always when unset, on request when set.
 wanted() { is_set "$1" || return 0; yes_no "henry/$1 is already set. Replace it?"; }
@@ -101,11 +109,13 @@ take() {
     note "(${#v} characters, $from)" >&2
     printf '%s' "$v"
 }
-seal() { printf '%s' "$2" | "$H" secret set "henry/$1" >/dev/null && note "sealed henry/$1"; }
+seal() { printf '%s' "$2" | "$H" secret set "henry/$1" >/dev/null && SEALED+=$'\n'$1 && note "sealed henry/$1"; }
 
 # Cloudflare's API with the token from a pipe, so it never shows in `ps`.
 cf() { printf 'header = "Authorization: Bearer %s"\n' "$T" | curl -sS -K - "https://api.cloudflare.com/client/v4$1"; }
-ok() { grep -q '"success": *true'; }
+# grep reads to the end: one that stops at the first match can fail curl's
+# write, and under pipefail a good answer then reads as a refusal.
+ok() { grep '"success": *true' >/dev/null; }
 
 bold "Cloudflare API token"
 if ! wanted CLOUDFLARE_API_TOKEN; then
@@ -120,7 +130,7 @@ else
         T=$(take "API token")
         fails=""
         cf "/accounts/$ACCOUNT/cfd_tunnel/$TUNNEL/configurations" | ok || fails+="Cloudflare Tunnel Edit (or the account/tunnel id); "
-        zone_id=$(cf "/zones?name=$ZONE" | grep -o '"id": *"[a-f0-9]\{32\}"' | head -1 | grep -o '[a-f0-9]\{32\}' || true)
+        zone_id=$(cf "/zones?name=$ZONE" | grep -o '"id": *"[a-f0-9]\{32\}"' | sed -n 1p | grep -o '[a-f0-9]\{32\}' || true)
         if [[ -z $zone_id ]]; then
             fails+="Zone Read on $ZONE; "
         else
@@ -169,7 +179,7 @@ else
     while :; do
         raw=$(take "Tunnel token")
         # The dashboard shows a whole install command; the token is its eyJ… word.
-        TT=$(printf '%s' "$raw" | grep -o 'eyJ[A-Za-z0-9+/=_-]*' | head -1 || true)
+        TT=$(printf '%s' "$raw" | grep -o 'eyJ[A-Za-z0-9+/=_-]*' | sed -n 1p || true)
         why=$(tunnel_problem "${TT:-$raw}")
         [[ -z $why ]] && break
         note "Not kept: $why."

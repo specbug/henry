@@ -40,7 +40,10 @@ pub fn marks(now: i64, created_at: i64, history: &[(i64, Status)]) -> Vec<Option
     let mut current: Option<Status> = None;
     (0..HOURS as i64)
         .map(|h| {
-            let (from, to) = (start + h * HOUR_MS, start + (h + 1) * HOUR_MS);
+            let from = start + h * HOUR_MS;
+            // The last hour holds `now` itself: a change made this very
+            // millisecond is marked.
+            let to = if h + 1 == HOURS as i64 { now + 1 } else { from + HOUR_MS };
             while next < changes.len() && changes[next].0 <= from {
                 current = Some(changes[next].1);
                 next += 1;
@@ -107,6 +110,13 @@ mod tests {
 
     fn at(hours_ago: f64) -> i64 {
         NOW - (hours_ago * HOUR_MS as f64) as i64
+    }
+
+    #[test]
+    fn an_app_made_this_very_millisecond_has_a_mark() {
+        let m = marks(NOW, NOW, &[(NOW, Status::Live)]);
+        assert_eq!(m[HOURS - 1], Some(Status::Onboarding), "the worst it held this hour");
+        assert_eq!(m[HOURS - 2], None);
     }
 
     #[test]
