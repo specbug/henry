@@ -71,8 +71,9 @@ printf '%s\n' acct "$TUNNEL" example.com \
     y "" bad-id bad-secret y r2-id r2-secret \
     pw1 pw1 | scripts/setup.sh
 expect_agents "the first run"
+sealed=$("$BIN" secret list henry)
 for s in CLOUDFLARE_API_TOKEN CLOUDFLARE_TUNNEL_TOKEN GITHUB_TOKEN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY RESTIC_PASSWORD; do
-    "$BIN" secret list henry | grep -qx "$s" || { echo "FAIL: $s was not sealed" >&2; exit 1; }
+    grep -qx "$s" <<<"$sealed" || { echo "FAIL: $s was not sealed" >&2; exit 1; }
 done
 [[ $(cat "$HENRY_HOME/tunnel.token") == "$TT" ]] || { echo "FAIL: the tunnel token file is not the token" >&2; exit 1; }
 echo "ok: every secret sealed, and the tunnel token file holds exactly the token"

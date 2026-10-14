@@ -2,8 +2,8 @@ name: mac-setup
 
 # scripts/setup.sh for real on a Mac: Homebrew, launchd and the Keychain,
 # with Cloudflare, GitHub, R2 and Podman faked. Run twice, the second time
-# with Henry's agents up, as a re-run on the hosting Mac is. Mac minutes are
-# dear, so only for changes to what it tests.
+# with Henry's agents up, as a re-run on the hosting Mac is. It is the
+# slowest job, so only for changes to what it tests.
 on:
   push:
     branches: [main]
