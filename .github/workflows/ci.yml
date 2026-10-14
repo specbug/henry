@@ -42,3 +42,15 @@ jobs:
       - run: cargo test --workspace
       - name: the example lease passes its own check
         run: cargo run -q -p henry -- check examples/lease.toml
+
+  # scripts/setup.sh for real on a Mac: Homebrew, launchd and the Keychain,
+  # with Cloudflare, GitHub, R2 and Podman faked. Run twice, the second time
+  # with Henry's agents up, as a re-run on the hosting Mac is.
+  mac-setup:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p henry
+      - run: scripts/test-setup.sh target/debug/henry

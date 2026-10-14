@@ -28,9 +28,14 @@ for tool in brew cargo git podman curl; do
 done
 
 bold "Building Henry"
-cargo install --path crates/henry --locked --quiet
-H=$(command -v henry || true)
-[[ -n $H ]] || H="$HOME/.cargo/bin/henry"
+if [[ -n ${HENRY_BIN:-} ]]; then
+    # A binary already built, e.g. by CI or by scripts/test-setup.sh.
+    H=$HENRY_BIN
+else
+    cargo install --path crates/henry --locked --quiet
+    H=$(command -v henry || true)
+    [[ -n $H ]] || H="$HOME/.cargo/bin/henry"
+fi
 [[ -x $H ]] || die "henry was built but is not at $H; is ~/.cargo/bin on your PATH?"
 note "$("$H" --version) at $H"
 
