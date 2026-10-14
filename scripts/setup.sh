@@ -40,6 +40,11 @@ for formula in caddy cloudflared; do
     note "$formula: $(brew list --versions "$formula")"
 done
 
+# Keys pressed while it built would answer the first question; drop them.
+if [[ -t 0 ]]; then
+    while read -r -t 1 -n 1000 _; do :; done
+fi
+
 # --- henry.toml ---------------------------------------------------------------
 
 CONF=$("$H" where | sed -n 's/^config *//p')
