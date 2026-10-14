@@ -436,7 +436,14 @@ The step-by-step for odyssey and draw is [docs/migration.md](docs/migration.md).
 
 ## Using it
 
+On the Mac, `scripts/setup.sh` does the first-time setup: it builds and
+installs Henry, installs Caddy and cloudflared, asks for your Cloudflare
+account and tunnel ids, checks each token against Cloudflare before sealing
+it, optionally sets up backups to R2, and starts Henry under launchd. Run it
+again any time: it keeps what is set and asks only for what is missing.
+
 ```sh
+scripts/setup.sh
 cargo build --release
 ./target/release/henry onboard https://github.com/you/draw --hostname draw.example.com
 ./target/release/henry plans draw                # the plans onboarding weighed

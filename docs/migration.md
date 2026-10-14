@@ -18,7 +18,8 @@ What carries over:
 
 ## Before the first app
 
-Henry is installed and running (`henry install`), with:
+Run `scripts/setup.sh` from the Henry repo. It leaves Henry installed and
+running, with:
 
 - `[cloudflare]` and `henry/CLOUDFLARE_API_TOKEN`, so Henry's tunnel exists.
   Your zone must be listed in `zones`.
