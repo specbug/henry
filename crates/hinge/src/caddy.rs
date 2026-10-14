@@ -80,8 +80,10 @@ impl Caddy {
     }
 }
 
-/// How long a refused connection is retried. Caddy restarts its admin
-/// endpoint after every load, and a request in that gap is refused.
+/// How long a failed connection is retried. Caddy restarts its admin
+/// endpoint after every load: a request in that gap is refused, or accepted
+/// and then dropped unanswered. Both calls are safe to repeat: reading the
+/// config, and loading one that is the same each time.
 const ADMIN_RESTART: Duration = Duration::from_millis(1500);
 
 impl Caddy {
@@ -89,7 +91,7 @@ impl Caddy {
         let deadline = tokio::time::Instant::now() + ADMIN_RESTART;
         loop {
             match req().send().await {
-                Err(e) if e.is_connect() && tokio::time::Instant::now() < deadline => {
+                Err(e) if (e.is_connect() || e.is_request()) && tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 other => return other.map_err(|e| Error::Unreachable("Caddy", e.to_string())),

@@ -236,6 +236,23 @@ async fn mock_caddy_on(listener: tokio::net::TcpListener) -> (String, Arc<CaddyS
 }
 
 #[tokio::test]
+async fn a_connection_caddy_drops_mid_request_is_tried_again() {
+    // The admin endpoint accepts, then closes the connection unanswered:
+    // what a request sees when it lands just as Caddy restarts the endpoint.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = tokio::spawn(async move {
+        let (conn, _) = listener.accept().await.unwrap();
+        drop(conn);
+        mock_caddy_on(listener).await
+    });
+    let caddy = Caddy::new(format!("http://{addr}"), "127.0.0.1:8080");
+    assert!(caddy.apply(&[]).await.unwrap());
+    let (_, state) = served.await.unwrap();
+    assert_eq!(*state.loads.lock().unwrap(), 1);
+}
+
+#[tokio::test]
 async fn caddy_is_waited_for_while_its_admin_endpoint_restarts() {
     // A port nothing listens on yet, the way Caddy's admin port is for a
     // moment after each load.
