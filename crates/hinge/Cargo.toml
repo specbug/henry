@@ -8,6 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 canon.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+hush.workspace = true
 lease.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -16,6 +19,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 reqwest.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

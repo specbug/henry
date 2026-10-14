@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ComposeService, Need, Site, Survey, image_kind, looks_secret};
+use crate::{ComposeService, Need, Site, Survey, image_kind, is_worker_module, looks_secret};
 
 /// Where an app is going: its name, branch and public hostname.
 #[derive(Debug, Clone)]
@@ -85,11 +85,17 @@ impl Plan {
                 problems.push(format!("`{}` builds from `{path}`, which the plan does not include", s.name));
             }
         }
-        let wanted: BTreeSet<&str> = lease.services.iter().flat_map(|s| s.secrets.iter().map(String::as_str)).collect();
+        let wanted: BTreeSet<&str> = lease
+            .services
+            .iter()
+            .flat_map(|s| s.secrets.iter())
+            .chain(lease.workers.iter().flat_map(|w| w.secrets.values()))
+            .map(String::as_str)
+            .collect();
         let generated: BTreeSet<&str> = self.generate.iter().map(|g| g.name.as_str()).collect();
         for g in &self.generate {
             if !wanted.contains(g.name.as_str()) {
-                problems.push(format!("`{}` is generated but no service lists it in `secrets`", g.name));
+                problems.push(format!("`{}` is generated but no service or worker lists it in `secrets`", g.name));
             }
             for name in g.template.as_deref().map(placeholders).unwrap_or_default() {
                 if !generated.contains(name) || name == g.name {
@@ -157,17 +163,18 @@ impl Survey {
         }
         let mut gaps = Vec::new();
         let mut files = Vec::new();
-        for w in &self.workers {
-            gaps.push(format!(
-                "`{w}` is a Cloudflare Worker: it stays on Cloudflare, deployed with wrangler; Henry does not run it"
-            ));
-        }
+        let workers = self.plan_workers(ask.app, &mut gaps);
+        // What Henry itself gives the app: Workers' shared secrets and URLs.
+        let from_workers: BTreeSet<String> =
+            workers.iter().flat_map(|w| w.secrets.values().chain(&w.url)).cloned().collect();
         let mut services = if let Some(c) = self.compose.as_ref().filter(|c| !c.services.is_empty()) {
             from_compose(&c.services, &mut gaps)
         } else {
             vec![
                 self.dockerfile_service(&mut gaps)
-                    .or_else(|| self.site.as_ref().map(|site| self.site_service(site, &mut files, &mut gaps)))
+                    .or_else(|| {
+                        self.site.as_ref().map(|site| self.site_service(site, &from_workers, &mut files, &mut gaps))
+                    })
                     .or_else(|| self.stack_service(&mut gaps))?,
             ]
         };
@@ -178,6 +185,16 @@ impl Survey {
         let mut generate = Vec::new();
         let main = main_service(&services);
         self.add_backing(&mut services, main.as_deref(), &mut generate, &mut gaps);
+        for w in &workers {
+            for app_secret in w.secrets.values() {
+                push_generate(&mut generate, app_secret, None);
+            }
+        }
+        // The app's code reads what its Workers share: it gets them as secrets.
+        if let Some(main) = &main {
+            let svc = services.iter_mut().find(|s| &s.name == main).expect("the main service exists");
+            svc.secrets.extend(from_workers.iter().filter(|v| self.env.contains_key(*v)).cloned());
+        }
         // A compose file already says which service gets which variable: only
         // a service that loads an `env_file` gets what the repo documents.
         let configured: Vec<String> = match &self.compose {
@@ -206,7 +223,7 @@ impl Survey {
             }
         }
 
-        let lease = write_lease(ask, &services);
+        let lease = write_lease(ask, &services, &workers);
         let notes = format!("drafted by Sound from the repo; {} guess(es)", gaps.len());
         Some(Skeleton { plan: Plan { lease, files, generate, notes }, source: SkeletonSource::Sound, gaps })
     }
@@ -240,7 +257,13 @@ impl Survey {
     /// published files, as Vercel would serve them. A build command runs as
     /// the container starts, so it sees the app's secrets as a Vercel build
     /// sees its env, and no image holds them.
-    fn site_service(&self, site: &Site, files: &mut Vec<(String, String)>, gaps: &mut Vec<String>) -> Svc {
+    fn site_service(
+        &self,
+        site: &Site,
+        from_workers: &BTreeSet<String>,
+        files: &mut Vec<(String, String)>,
+        gaps: &mut Vec<String>,
+    ) -> Svc {
         let dir = format!("{OVERLAY_DIR}site");
         let mut svc = Svc {
             name: "web".into(),
@@ -286,14 +309,15 @@ impl Survey {
                 if !["node", "npm", "npx", "pnpm", "yarn", "corepack", "sh"].contains(&tool) {
                     gaps.push(format!("the build `{build}` runs in node:22-alpine, which may not have `{tool}`"));
                 }
-                let reads = self.build_reads(build);
+                let all = self.build_reads(build);
+                let reads: Vec<String> = all.iter().filter(|r| !from_workers.contains(*r)).cloned().collect();
+                svc.secrets.extend(all);
                 if !reads.is_empty() {
                     gaps.push(format!(
                         "the build reads {}: each is a secret the app waits on, as a Vercel build reads its env",
                         reads.join(", ")
                     ));
                 }
-                svc.secrets.extend(reads);
             }
         }
         files.push((format!("{dir}/Dockerfile"), docker));
@@ -347,6 +371,93 @@ impl Survey {
             .filter(|(_, v)| named.is_empty() || v.read_in.iter().any(|f| named.contains(&f.as_str())))
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// The Workers Henry can deploy as they are, linked to the app: a secret
+    /// the Worker reads that the app also reads (`CAIRN_SYNC_TOKEN` for
+    /// `SYNC_TOKEN`) is one value Henry makes for both, and an app variable
+    /// named for the Worker's URL (`CAIRN_SYNC_URL` for `cairn-sync`) is set
+    /// to it. Each link is a guess, and said so.
+    fn plan_workers(&self, app: &str, gaps: &mut Vec<String>) -> Vec<WorkerPlan> {
+        let mut out: Vec<WorkerPlan> = Vec::new();
+        let mut used = BTreeSet::new();
+        for w in &self.workers {
+            let c = &w.config;
+            let why_not = if !c.unsupported.is_empty() {
+                Some(format!("it uses {}, which Henry does not set up", c.unsupported.join(", ")))
+            } else if !w.packages.is_empty() {
+                Some(format!(
+                    "it imports {}; Henry uploads plain modules, so bundle it into one file first",
+                    w.packages.join(", ")
+                ))
+            } else if !is_worker_module(&c.main) || !self.files.iter().any(|f| *f == join(&c.dir, &c.main)) {
+                Some(format!("its main `{}` is not a JavaScript module in the repo", c.main))
+            } else {
+                None
+            };
+            if let Some(why) = why_not {
+                gaps.push(format!("the Worker in `{}` is not deployed: {why}", c.dir));
+                continue;
+            }
+            let short = c.name.strip_prefix(&format!("{app}-")).unwrap_or(&c.name);
+            let dir_name = c.dir.rsplit('/').next().unwrap_or(&c.dir);
+            let name = [lease_name(short), lease_name(dir_name), "worker".to_owned()]
+                .into_iter()
+                .filter(|n| lease::is_name(n))
+                .map(|n| free_worker_name(&out, &n))
+                .find(|n| format!("henry-{app}-{n}").len() <= lease::SCRIPT_MAX);
+            let Some(name) = name else {
+                gaps.push(format!("the Worker in `{}` is not deployed: no name fits Cloudflare's limit", c.dir));
+                continue;
+            };
+            let mut plan = WorkerPlan {
+                name: name.clone(),
+                dir: c.dir.clone(),
+                buckets: c.buckets.clone(),
+                secrets: BTreeMap::new(),
+                url: None,
+            };
+            for s in &w.secrets {
+                let link = self.env.keys().find(|v| (*v == s || v.ends_with(&format!("_{s}"))) && !used.contains(*v));
+                match link {
+                    Some(v) => {
+                        gaps.push(format!("`{v}` is made by Henry and given to Worker `{name}` as {s}"));
+                        plan.secrets.insert(s.clone(), v.clone());
+                    }
+                    None => {
+                        gaps.push(format!("Worker `{name}`'s {s} is made by Henry; nothing else in the repo reads it"));
+                        plan.secrets.insert(s.clone(), s.clone());
+                    }
+                }
+            }
+            used.extend(plan.secrets.values().cloned());
+            let stems: Vec<String> = [c.name.as_str(), short, dir_name]
+                .iter()
+                .map(|n| n.to_ascii_uppercase().replace(['-', '.'], "_"))
+                .filter(|n| !n.is_empty())
+                .collect();
+            plan.url = self
+                .env
+                .keys()
+                .filter(|v| !used.contains(*v))
+                .find(|v| {
+                    v.strip_suffix("_URL")
+                        .is_some_and(|stem| stems.iter().any(|t| stem == t || stem.ends_with(&format!("_{t}"))))
+                })
+                .cloned();
+            if let Some(url) = &plan.url {
+                gaps.push(format!("Henry sets `{url}` to Worker `{name}`'s URL once it is deployed"));
+                used.insert(url.clone());
+            }
+            if !c.buckets.is_empty() {
+                gaps.push(format!(
+                    "Worker `{name}`'s {} stores in Henry's R2 bucket, under apps/{app}/{name}/",
+                    c.buckets.join(", ")
+                ));
+            }
+            out.push(plan);
+        }
+        out
     }
 
     fn stack_service(&self, gaps: &mut Vec<String>) -> Option<Svc> {
@@ -608,12 +719,34 @@ fn script(what: &str, body: &str) -> String {
     format!("#!/bin/sh\n# Written by Henry: {what}.\nset -e\n{}\n", body.trim_end())
 }
 
+/// A Worker as it will be written into the lease.
+#[derive(Debug)]
+struct WorkerPlan {
+    name: String,
+    dir: String,
+    buckets: Vec<String>,
+    secrets: BTreeMap<String, String>,
+    url: Option<String>,
+}
+
+fn free_worker_name(taken: &[WorkerPlan], want: &str) -> String {
+    (0..)
+        .map(|i| if i == 0 { want.to_owned() } else { format!("{want}-{i}") })
+        .find(|n| !taken.iter().any(|w| &w.name == n))
+        .expect("an unbounded range finds a free name")
+}
+
+/// `dir/file`, where `.` is the root.
+fn join(dir: &str, file: &str) -> String {
+    if dir == "." { file.to_owned() } else { format!("{dir}/{file}") }
+}
+
 /// TOML string quoting.
 fn q(s: &str) -> String {
     toml::Value::String(s.to_owned()).to_string()
 }
 
-fn write_lease(ask: &Ask<'_>, services: &[Svc]) -> String {
+fn write_lease(ask: &Ask<'_>, services: &[Svc], workers: &[WorkerPlan]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "name = {}\nbranch = {}\n", q(ask.app), q(ask.branch));
     for s in services {
@@ -651,6 +784,21 @@ fn write_lease(ask: &Ask<'_>, services: &[Svc]) -> String {
             if let Some(b) = backup {
                 let _ = writeln!(out, "backup = {}", q(b));
             }
+        }
+        out.push('\n');
+    }
+    for w in workers {
+        let _ = writeln!(out, "[[worker]]\nname = {}\ndir = {}", q(&w.name), q(&w.dir));
+        if !w.buckets.is_empty() {
+            let items: Vec<String> = w.buckets.iter().map(|b| q(b)).collect();
+            let _ = writeln!(out, "buckets = [{}]", items.join(", "));
+        }
+        if !w.secrets.is_empty() {
+            let items: Vec<String> = w.secrets.iter().map(|(k, v)| format!("{k} = {}", q(v))).collect();
+            let _ = writeln!(out, "secrets = {{ {} }}", items.join(", "));
+        }
+        if let Some(url) = &w.url {
+            let _ = writeln!(out, "url = {}", q(url));
         }
         out.push('\n');
     }

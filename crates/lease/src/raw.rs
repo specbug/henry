@@ -15,6 +15,21 @@ pub struct Lease {
     pub ai: Option<Ai>,
     #[serde(default, rename = "service")]
     pub services: Vec<Service>,
+    #[serde(default, rename = "worker")]
+    pub workers: Vec<Worker>,
+}
+
+/// A Cloudflare Worker in the repo, which Henry deploys to Cloudflare.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Worker {
+    pub name: String,
+    pub dir: String,
+    #[serde(default)]
+    pub buckets: Vec<String>,
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

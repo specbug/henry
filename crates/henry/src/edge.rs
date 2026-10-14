@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use canon::Canon;
 use hinge::caddy::Caddy;
 use hinge::cloudflare::Cloudflare;
+use hinge::workers::Workers;
 use hinge::{Hinge, Route, Settings};
 use hush::{HOST, Hush};
 use tracing::warn;
@@ -81,6 +82,22 @@ pub fn cloudflare(config: &Config, hush: &Hush) -> Result<Option<Cloudflare>> {
     })
 }
 
+/// Henry's R2 bucket: the one `[ark]` backs up to, when that is on R2.
+pub fn r2_bucket(config: &Config) -> Option<String> {
+    let repo = config.ark.as_ref()?.repository.strip_prefix("s3:")?;
+    let (host, path) = repo.strip_prefix("https://")?.split_once('/')?;
+    if !host.ends_with(".r2.cloudflarestorage.com") {
+        return None;
+    }
+    path.split('/').next().filter(|b| !b.is_empty()).map(str::to_owned)
+}
+
+/// The Workers deployer, when `[cloudflare]` and its token are set.
+pub fn workers(config: &Config, canon: Arc<Canon>, hush: Arc<Hush>) -> Result<Option<Workers<Cloudflare>>> {
+    let edge = cloudflare(config, &hush)?;
+    Ok(edge.map(|cf| Workers::new(canon, hush, cf, r2_bucket(config), Duration::from_secs(300))))
+}
+
 pub fn hinge(config: &Config, canon: Arc<Canon>, hush: &Hush) -> Result<Hinge<Caddy, Cloudflare>> {
     let caddy = Caddy::new(config.hinge.admin.clone(), config.hinge.listen.clone());
     let tunnel = cloudflare(config, hush)?;
@@ -95,6 +112,21 @@ pub fn hinge(config: &Config, canon: Arc<Canon>, hush: &Hush) -> Result<Hinge<Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workers_store_in_the_r2_bucket_backups_go_to() {
+        let mut config = Config::default();
+        assert_eq!(r2_bucket(&config), None);
+        let ark = |repo: &str| {
+            Some(crate::home::ArkConfig { repository: repo.into(), ..toml::from_str("repository = \"x\"").unwrap() })
+        };
+        config.ark = ark("s3:https://acct.r2.cloudflarestorage.com/henry/henry");
+        assert_eq!(r2_bucket(&config).as_deref(), Some("henry"));
+        config.ark = ark("s3:https://s3.amazonaws.com/bucket/henry");
+        assert_eq!(r2_bucket(&config), None, "not R2: Workers cannot bind it");
+        config.ark = ark("rclone:gdrive:henry");
+        assert_eq!(r2_bucket(&config), None);
+    }
 
     #[test]
     fn the_webhook_route_follows_the_http_port() {

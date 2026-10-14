@@ -10,6 +10,7 @@
 //! value is kept only when the name does not look like a secret.
 
 mod skeleton;
+pub mod wrangler;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -88,9 +89,9 @@ pub struct Survey {
     pub hints: Vec<String>,
     /// A site of files, as Vercel would serve it: no server of its own.
     pub site: Option<Site>,
-    /// Directories holding a Cloudflare Worker (`wrangler.toml`). Workers
-    /// run on Cloudflare, deployed with wrangler; Henry never runs them.
-    pub workers: Vec<String>,
+    /// Cloudflare Workers (a `wrangler.toml` and the code beside it). They
+    /// run on Cloudflare; Henry deploys them there, never on the Mac.
+    pub workers: Vec<Worker>,
     /// Every file read, relative to the root, in walk order.
     pub files: Vec<String>,
     /// The walk stopped at its limit; `files` is not the whole repo.
@@ -100,6 +101,21 @@ pub struct Survey {
     root_index: bool,
     /// Backing services each manifest's dependencies suggest, by directory.
     manifest_needs: Vec<(String, Vec<Need>)>,
+}
+
+/// A Cloudflare Worker in the repo.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Worker {
+    pub config: wrangler::Config,
+    /// What its code reads from `env` that its config does not bind.
+    pub secrets: Vec<String>,
+    /// Packages it imports, which only a bundler could include.
+    pub packages: Vec<String>,
+}
+
+/// Whether a file is a Worker's code.
+pub fn is_worker_module(path: &str) -> bool {
+    [".js", ".mjs"].iter().any(|e| path.ends_with(e))
 }
 
 /// A static site: how it is built, and which directory is published.
@@ -303,6 +319,7 @@ impl Survey {
             // Depth-first, in name order.
             stack.extend(subdirs.into_iter().rev());
         }
+        s.read_workers(root);
         s.settle();
         Ok(s)
     }
@@ -319,8 +336,13 @@ impl Survey {
             self.vercel_reincludes = text().is_some_and(|t| t.lines().any(|l| l.trim_start().starts_with('!')));
         } else if rel == "index.html" {
             self.root_index = true;
-        } else if ["wrangler.toml", "wrangler.json", "wrangler.jsonc"].contains(&lower.as_str()) {
-            self.workers.push(dir.clone());
+        } else if wrangler::is_config(&lower) {
+            let config = wrangler::read(path, &dir).unwrap_or_else(|| wrangler::Config {
+                dir: dir.clone(),
+                unsupported: vec![format!("{rel} does not parse")],
+                ..wrangler::Config::default()
+            });
+            self.workers.push(Worker { config, ..Worker::default() });
         } else if lower == "dockerfile"
             || lower == "containerfile"
             || lower.starts_with("dockerfile.")
@@ -369,6 +391,24 @@ impl Survey {
         }
     }
 
+    /// Each Worker's code: the secrets it reads and the packages it imports.
+    fn read_workers(&mut self, root: &Path) {
+        for w in &mut self.workers {
+            let inside = |f: &&String| w.config.dir == "." || f.starts_with(&format!("{}/", w.config.dir));
+            let sources: Vec<String> = self
+                .files
+                .iter()
+                .filter(inside)
+                .filter(|f| is_worker_module(f) || f.ends_with(".ts"))
+                .filter(|f| std::fs::metadata(root.join(f)).is_ok_and(|m| m.len() <= MAX_SOURCE_BYTES))
+                .filter_map(|f| std::fs::read_to_string(root.join(f)).ok())
+                .collect();
+            w.secrets = wrangler::secrets(&w.config, &sources);
+            w.packages =
+                sources.iter().flat_map(|s| wrangler::packages(s)).collect::<BTreeSet<_>>().into_iter().collect();
+        }
+    }
+
     fn env_example(&mut self, text: &str) {
         for line in text.lines() {
             let line = line.trim().trim_start_matches("export ").trim();
@@ -411,7 +451,7 @@ impl Survey {
     fn settle(&mut self) {
         // A Worker's code runs on Cloudflare: its manifest is no app to
         // build, and what it reads is no config of this app's.
-        let workers = self.workers.clone();
+        let workers: Vec<String> = self.workers.iter().map(|w| w.config.dir.clone()).collect();
         let in_worker = |path: &str| workers.iter().any(|w| w == "." || path.starts_with(&format!("{w}/")));
         self.stacks.retain(|s| !in_worker(&format!("{}/", s.dir)));
         for (dir, needs) in std::mem::take(&mut self.manifest_needs) {
@@ -591,11 +631,15 @@ impl Survey {
             }
         }
         if !self.workers.is_empty() {
-            let _ = writeln!(
-                out,
-                "\n## Cloudflare Workers (stay on Cloudflare, deployed with wrangler; never run by Henry)\n{}",
-                self.workers.join(", ")
-            );
+            let _ = writeln!(out, "\n## Cloudflare Workers (Henry deploys them to Cloudflare; never run on the Mac)");
+            for w in &self.workers {
+                let c = &w.config;
+                let _ = writeln!(
+                    out,
+                    "{} ({}): main {}, R2 {:?}, secrets {:?}, packages {:?}, unsupported {:?}",
+                    c.dir, c.name, c.main, c.buckets, w.secrets, w.packages, c.unsupported
+                );
+            }
         }
         if !self.needs.is_empty() {
             let _ = writeln!(out, "\n## Backing services it seems to need\n{:?}", self.needs);

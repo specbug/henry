@@ -85,9 +85,10 @@ tried, checks it, builds it and puts it on trial:
    and only the output directory is published, never dotfiles, `.git` or
    `node_modules`. Its build command runs as the container starts, with the
    app's secrets, as a Vercel build sees its env; the env vars that build
-   reads are secrets the app waits on. A Cloudflare Worker in the repo (a
-   `wrangler.toml`) stays on Cloudflare, deployed with wrangler; Henry
-   neither builds nor runs it.
+   reads are secrets the app waits on.
+
+   A Cloudflare Worker in the repo (a `wrangler.toml`) runs on Cloudflare,
+   and Henry deploys it there: see [Cloudflare Workers](#cloudflare-workers).
 3. **Ghost's plan.** When Sound's draft fails, or there is nothing to draft
    from, Ghost reads the repo (list, read, search; never `.env` files or keys)
    and proposes a lease, and a Dockerfile under `.henry/` if one is needed.
@@ -124,6 +125,39 @@ max_tokens = 2000000                          # per onboarding
 Meta's API, Gemini and OpenAI are reached through their OpenAI-compatible
 endpoints; Claude through its own API. `[ai.endpoints]` overrides an endpoint.
 With no key at all, onboarding gets as far as the repo and Sound can take it.
+
+### Cloudflare Workers
+
+An app may come with a Worker: cairn keeps its sync in one, beside a static
+site. Henry deploys it with each release as `henry-<app>-<name>` on your
+workers.dev subdomain, and wires it to the app:
+
+- **Its storage is Henry's.** Each R2 binding is Henry's bucket (the one
+  `[ark]` backs up to), seen through a wrapper that keeps the Worker to
+  `apps/<app>/<worker>/<binding>/`. Its code never gets the bucket itself.
+- **Its secrets are made for it.** A secret the Worker reads that the app
+  reads too (`SYNC_TOKEN` and `CAIRN_SYNC_TOKEN`) becomes one value Henry
+  generates for both. The app's variable for the Worker's URL
+  (`CAIRN_SYNC_URL`) is set once it is deployed.
+- **It follows the release.** A release on trial runs with its own Worker;
+  if the trial fails, the live release's Worker goes back.
+
+Henry uploads plain JavaScript modules as they are. A Worker that imports
+packages (it needs a bundler), or uses KV, D1, Durable Objects or cron
+triggers, is named in the plan and not deployed.
+
+Its Cloudflare token needs two more permissions on the account: Workers
+Scripts → Edit and Workers R2 Storage → Edit. `scripts/setup.sh` asks for
+them, and `henry worker check` says whether they are in place.
+
+Moving a Worker's data in from its old bucket copies it, through a Worker
+that lives only as long as the copy; the old bucket is only read, and
+anything the app already wrote on Henry is kept:
+
+```sh
+henry worker import cairn/sync/BUCKET --from cairn-state
+henry worker                     # what is deployed, where, or why not
+```
 
 ### Railpack
 

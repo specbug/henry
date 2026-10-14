@@ -123,13 +123,17 @@ if ! wanted CLOUDFLARE_API_TOKEN; then
 else
     note "Create one at dash.cloudflare.com/profile/api-tokens → Create Token → Custom token:"
     steps "Policy on the entire account: Cloudflare Tunnel (listed as Argo Tunnel) → Edit." \
+        "Add policies on the entire account: Workers Scripts → Edit, and Workers R2 Storage → Edit." \
         "Add a policy on the zone $ZONE: DNS → Edit, and Zone → Read." \
         "Create, and copy the token: it is shown once."
+    note "Workers: Henry deploys an app's Cloudflare Workers itself, storing what they keep in its R2 bucket."
     note "Each permission is checked against Cloudflare before the token is kept."
     while :; do
         T=$(take "API token")
         fails=""
         cf "/accounts/$ACCOUNT/cfd_tunnel/$TUNNEL/configurations" | ok || fails+="Cloudflare Tunnel Edit (or the account/tunnel id); "
+        cf "/accounts/$ACCOUNT/workers/scripts" | ok || fails+="Workers Scripts Edit; "
+        cf "/accounts/$ACCOUNT/r2/buckets" | ok || fails+="Workers R2 Storage Edit; "
         zone_id=$(cf "/zones?name=$ZONE" | grep -o '"id": *"[a-f0-9]\{32\}"' | sed -n 1p | grep -o '[a-f0-9]\{32\}' || true)
         if [[ -z $zone_id ]]; then
             fails+="Zone Read on $ZONE; "
@@ -283,6 +287,20 @@ if has ark; then
 fi
 
 # --- start --------------------------------------------------------------------
+
+bold "Cloudflare Workers"
+# Henry checks its own token: a kept one's value never comes back out.
+if out=$("$H" worker check 2>&1); then
+    note "Henry may deploy apps' Workers into its R2 bucket."
+else
+    printf '%s\n' "$out" | sed 's/^/  /'
+    note "Apps with a Worker wait until these are in place. Add them to the same token:"
+    steps "dash.cloudflare.com/profile/api-tokens → your Henry token → Edit." \
+        "Add policies on the entire account: Workers Scripts → Edit, and Workers R2 Storage → Edit." \
+        "Continue to summary → Update token. Its value stays the same; nothing to paste." \
+        "No workers.dev subdomain yet? Workers & Pages in the dashboard picks one." \
+        "Then \`henry worker check\` says whether all is in place."
+fi
 
 bold "Starting Henry"
 "$H" install

@@ -253,3 +253,48 @@ fn all_violations_are_reported_at_once() {
     assert!(got.contains(&"branch_invalid"));
     assert!(got.contains(&"health_missing"));
 }
+
+const SITE: &str = r#"
+name = "cairn"
+[[service]]
+name = "web"
+port = 8080
+build = { image = "x" }
+health = { http = "/" }
+secrets = ["CAIRN_SYNC_TOKEN", "CAIRN_SYNC_URL"]
+"#;
+
+#[test]
+fn a_worker_is_deployed_under_henrys_name_with_its_bindings() {
+    let text = format!(
+        "{SITE}\n[[worker]]\nname = \"sync\"\ndir = \"worker/\"\nbuckets = [\"BUCKET\"]\n\
+         secrets = {{ SYNC_TOKEN = \"CAIRN_SYNC_TOKEN\" }}\nurl = \"CAIRN_SYNC_URL\"\n"
+    );
+    let lease = Lease::parse(&text).unwrap();
+    let w = &lease.workers[0];
+    assert_eq!((w.script("cairn"), w.dir.as_str()), ("henry-cairn-sync".to_owned(), "worker"));
+    assert_eq!(w.secrets["SYNC_TOKEN"], "CAIRN_SYNC_TOKEN");
+    assert_eq!(w.url.as_deref(), Some("CAIRN_SYNC_URL"));
+}
+
+#[test]
+fn a_worker_that_would_misbehave_is_refused() {
+    let worker = |body: &str| format!("{SITE}\n[[worker]]\nname = \"sync\"\ndir = \"worker\"\n{body}\n");
+    assert!(codes(&format!("{SITE}\n[[worker]]\nname = \"sync\"\ndir = \"../up\"\n")).contains(&"path_outside_repo"));
+    assert!(codes(&worker("buckets = [\"B\", \"B\"]")).contains(&"worker_binding_duplicate"));
+    assert!(codes(&worker("buckets = [\"T\"]\nsecrets = { T = \"X\" }")).contains(&"worker_binding_duplicate"));
+    assert!(codes(&worker("secrets = { HENRY_X = \"Y\" }")).contains(&"var_name_reserved"));
+    assert!(codes(&worker("secrets = { T = \"U\" }\nurl = \"U\"")).contains(&"worker_url_conflict"));
+    assert!(
+        matches!(Lease::parse(&worker("privileged = true")), Err(Refusal::Syntax(_))),
+        "unknown fields are refused"
+    );
+    let long = format!(
+        "{}\n[[worker]]\nname = \"{}\"\ndir = \"w\"\n",
+        SITE.replace("\"cairn\"", &format!("\"{}\"", "c".repeat(32))),
+        "a".repeat(32)
+    );
+    assert!(codes(&long).contains(&"worker_name_too_long"));
+    let twice = format!("{}[[worker]]\nname = \"sync\"\ndir = \"w\"\n", worker(""));
+    assert!(codes(&twice).contains(&"worker_duplicate"));
+}

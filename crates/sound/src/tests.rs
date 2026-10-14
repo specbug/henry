@@ -295,7 +295,8 @@ fn a_plan_must_fit_the_ask_and_keep_its_files_to_itself() {
             .contains("public at")
     );
     assert!(
-        refused(plan(good, vec![(".henry/Dockerfile", "")], vec![secret("C", None)])).contains("no service lists it")
+        refused(plan(good, vec![(".henry/Dockerfile", "")], vec![secret("C", None)]))
+            .contains("no service or worker lists it")
     );
     assert!(refused(plan(good, vec![(".henry/Dockerfile", "")], vec![secret("A", Some("{Z}"))])).contains("{Z}"));
     assert!(refused(plan("name = 1", vec![], vec![])).contains("refused"));
@@ -419,16 +420,27 @@ pub(crate) const VERCEL_SITE: &[(&str, &str)] = &[
     ("CLAUDE.md", "private\n"),
     ("draft.original.md", "private\n"),
     (".env", "SITE_SYNC_TOKEN=never-read\n"),
-    ("worker/wrangler.toml", "name = \"sync\"\nmain = \"worker.js\"\n"),
+    (
+        "worker/wrangler.toml",
+        "name = \"site-sync\"\nmain = \"worker.js\"\ncompatibility_date = \"2026-05-01\"\n\
+         [[r2_buckets]]\nbinding = \"BUCKET\"\nbucket_name = \"site-state\"\n",
+    ),
     ("worker/package.json", r#"{"devDependencies": {"wrangler": "^4"}, "dependencies": {"pg": "^8"}}"#),
-    ("worker/worker.js", "export default { fetch(req, env) { return new Response(env.SYNC_TOKEN) } }\n"),
+    (
+        "worker/worker.js",
+        "export default { async fetch(req, env) {\n  if (req.headers.get('Authorization') !== `Bearer ${env.SYNC_TOKEN}`) return new Response('no', { status: 401 });\n  const o = await env.BUCKET.get('state.json');\n  return new Response(o ? await o.text() : '{}');\n} };\n",
+    ),
 ];
 
 #[test]
-fn a_vercel_site_is_served_from_its_files_and_its_worker_left_to_cloudflare() {
+fn a_vercel_site_is_served_from_its_files_and_its_worker_deployed_to_cloudflare() {
     let r = repo(VERCEL_SITE);
     let survey = scan(&r);
-    assert_eq!(survey.workers, ["worker"]);
+    assert_eq!(survey.workers.len(), 1);
+    assert_eq!(
+        (survey.workers[0].config.dir.as_str(), survey.workers[0].secrets.as_slice()),
+        ("worker", &["SYNC_TOKEN".to_owned()][..])
+    );
     assert!(survey.stacks.is_empty(), "a Worker's manifest is no app to build: {:?}", survey.stacks);
     assert!(survey.needs.is_empty(), "nor are its dependencies the app's: {:?}", survey.needs);
     let site = survey.site.as_ref().unwrap();
@@ -441,15 +453,25 @@ fn a_vercel_site_is_served_from_its_files_and_its_worker_left_to_cloudflare() {
     assert_eq!(web.build, Build::Dockerfile { path: ".henry/site/Dockerfile".into(), context: ".".into() });
     assert_eq!((web.port, &web.health), (Some(8080), &Health::Http { path: "/".into() }));
     assert_eq!(web.public.as_ref().unwrap().hostname, "draw.example.com");
-    // What the build reads, it waits on; what only a dev script reads, it does not.
+    // What the build reads, Henry gives it; what only a dev script reads, it does not.
     assert_eq!(web.secrets, ["SITE_SYNC_TOKEN", "SITE_SYNC_URL"]);
+    // The Worker shares one made-up token with the site, and the site learns its URL.
+    let w = &lease.workers[0];
+    assert_eq!(
+        (w.name.as_str(), w.dir.as_str(), w.buckets.as_slice()),
+        ("site-sync", "worker", &["BUCKET".to_owned()][..])
+    );
+    assert_eq!(w.secrets["SYNC_TOKEN"], "SITE_SYNC_TOKEN");
+    assert_eq!(w.url.as_deref(), Some("SITE_SYNC_URL"));
+    assert_eq!(s.plan.generate, [Generate { name: "SITE_SYNC_TOKEN".into(), template: None }]);
+    assert!(!s.gaps.iter().any(|g| g.contains("waits on")), "nothing is left for you to paste: {:?}", s.gaps);
     let paths: Vec<&str> = s.plan.files.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(paths, [".henry/site/Dockerfile", ".henry/site/build.sh", ".henry/site/site.sh"]);
     let docker = &s.plan.files[0].1;
     assert!(docker.contains("FROM node:22-alpine") && docker.contains("ENV SITE_OUT=."), "{docker}");
     assert!(!docker.contains("install.sh"), "no package.json, nothing to install: {docker}");
     assert!(s.plan.files[1].1.contains("\nnode scripts/gen-config.js\n"));
-    assert!(s.gaps.iter().any(|g| g.contains("`worker` is a Cloudflare Worker")), "{:?}", s.gaps);
+    assert!(s.gaps.iter().any(|g| g.contains("under apps/draw/site-sync/")), "{:?}", s.gaps);
     assert!(s.gaps.iter().any(|g| g.contains("SITE_PREP_START") && g.contains("left unset")), "{:?}", s.gaps);
     assert!(survey.brief().contains("## Cloudflare Workers"));
 }
@@ -526,7 +548,29 @@ fn a_worker_beside_an_app_is_left_out_of_its_plan() {
         ("sync/index.js", "const u = process.env.SYNC_DB_URL;\n"),
     ]);
     let survey = scan(&r);
-    assert_eq!(survey.workers, ["sync"]);
+    assert_eq!(survey.workers[0].config.dir, "sync");
     assert_eq!(survey.stacks.len(), 1);
     assert!(survey.needs.is_empty() && !survey.env.contains_key("SYNC_DB_URL"), "{:?} {:?}", survey.needs, survey.env);
+}
+
+#[test]
+fn a_worker_henry_cannot_upload_as_is_is_named_and_left_out() {
+    let r = repo(&[
+        ("package.json", r#"{"scripts": {"start": "node index.js"}}"#),
+        ("api/wrangler.toml", "name = \"api\"\nmain = \"src/index.js\"\n"),
+        ("api/src/index.js", "import { Hono } from 'hono';\nexport default new Hono();\n"),
+        (
+            "cache/wrangler.toml",
+            "name = \"cache\"\nmain = \"index.js\"\n[[kv_namespaces]]\nbinding = \"KV\"\nid = \"x\"\n",
+        ),
+        ("cache/index.js", "export default {}\n"),
+    ]);
+    let s = scan(&r).skeleton(&ask()).unwrap();
+    assert!(lease_of(&s).workers.is_empty());
+    assert!(s.gaps.iter().any(|g| g.contains("`api` is not deployed") && g.contains("hono")), "{:?}", s.gaps);
+    assert!(
+        s.gaps.iter().any(|g| g.contains("`cache` is not deployed") && g.contains("kv_namespaces")),
+        "{:?}",
+        s.gaps
+    );
 }

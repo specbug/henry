@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::raw;
 use crate::size::{format_bytes, parse_bytes};
-use crate::{AiPrefs, Backup, Build, Health, Lease, Provider, Public, Resources, Service, Violation, Volume};
+use crate::{
+    AiPrefs, Backup, Build, Health, Lease, Provider, Public, Resources, SCRIPT_MAX, Service, Violation, Volume, Worker,
+};
 
 /// Ceilings a lease must stay under. The defaults suit one Mac mini.
 #[derive(Debug, Clone)]
@@ -115,9 +117,10 @@ pub fn check(raw: raw::Lease, limits: &Limits) -> Result<Lease, Vec<Violation>> 
     if r.0.is_empty() {
         check_cycles(&services, &mut r);
     }
+    let workers = check_workers(&raw.name, &raw.workers, &mut r);
 
     if r.0.is_empty() {
-        Ok(Lease { name: raw.name, branch, auto_deploy: raw.auto_deploy.unwrap_or(true), ai, services })
+        Ok(Lease { name: raw.name, branch, auto_deploy: raw.auto_deploy.unwrap_or(true), ai, services, workers })
     } else {
         Err(r.0)
     }
@@ -439,6 +442,67 @@ fn check_cycles(services: &[Service], r: &mut Report) {
     }
 }
 
+const MAX_WORKERS: usize = 8;
+
+fn check_workers(app: &str, raw: &[raw::Worker], r: &mut Report) -> Vec<Worker> {
+    if raw.len() > MAX_WORKERS {
+        r.add("worker", "workers_too_many", format!("{} workers is over the limit of {MAX_WORKERS}", raw.len()));
+    }
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for w in raw {
+        let at = format!("worker[{}]", w.name);
+        let before = r.0.len();
+        if !seen.insert(w.name.as_str()) {
+            r.add(&at, "worker_duplicate", format!("worker `{}` is defined twice", w.name));
+        }
+        if !is_name(&w.name) {
+            r.add(&at, "name_invalid", format!("`{}` must be a-z, 0-9 and '-', starting with a letter", w.name));
+        } else if format!("henry-{app}-{}", w.name).len() > SCRIPT_MAX {
+            r.add(
+                &at,
+                "worker_name_too_long",
+                format!("henry-{app}-{} is over Cloudflare's {SCRIPT_MAX} characters", w.name),
+            );
+        }
+        check_repo_path(&w.dir, &format!("{at}.dir"), r);
+        let mut bindings = BTreeSet::new();
+        for b in &w.buckets {
+            check_var(b, &format!("{at}.buckets"), r);
+            if !bindings.insert(b.as_str()) {
+                r.add(format!("{at}.buckets"), "worker_binding_duplicate", format!("`{b}` is bound twice"));
+            }
+        }
+        for (name, from) in &w.secrets {
+            check_var(name, &format!("{at}.secrets"), r);
+            check_var(from, &format!("{at}.secrets.{name}"), r);
+            if !bindings.insert(name.as_str()) {
+                r.add(format!("{at}.secrets"), "worker_binding_duplicate", format!("`{name}` is bound twice"));
+            }
+        }
+        if let Some(url) = &w.url {
+            check_var(url, &format!("{at}.url"), r);
+            if w.secrets.values().any(|v| v == url) {
+                r.add(
+                    format!("{at}.url"),
+                    "worker_url_conflict",
+                    format!("`{url}` is the Worker's URL, which Henry sets; it cannot also be one of its secrets"),
+                );
+            }
+        }
+        if r.0.len() == before {
+            out.push(Worker {
+                name: w.name.clone(),
+                dir: w.dir.trim_end_matches('/').to_owned(),
+                buckets: w.buckets.clone(),
+                secrets: w.secrets.clone(),
+                url: w.url.clone(),
+            });
+        }
+    }
+    out
+}
+
 fn check_var(name: &str, at: &str, r: &mut Report) {
     let mut chars = name.chars();
     let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
@@ -460,7 +524,8 @@ fn check_repo_path(path: &str, at: &str, r: &mut Report) -> bool {
     ok
 }
 
-pub(crate) fn is_name(s: &str) -> bool {
+/// Whether a name may name an app, a service or a worker.
+pub fn is_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= NAME_MAX
         && s.starts_with(|c: char| c.is_ascii_lowercase())

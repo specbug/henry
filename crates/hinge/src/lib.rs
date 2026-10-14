@@ -11,6 +11,7 @@
 
 pub mod caddy;
 pub mod cloudflare;
+pub mod workers;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;

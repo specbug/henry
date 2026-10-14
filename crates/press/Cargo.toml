@@ -13,6 +13,7 @@ hex.workspace = true
 hush.workspace = true
 lease.workspace = true
 sha2.workspace = true
+sound.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

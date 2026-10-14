@@ -69,11 +69,16 @@ impl Cloudflare {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
-        let mut req = self.client.request(method, format!("{}{path}", self.base)).bearer_auth(&self.token);
+        let mut req = self.client.request(method, format!("{}{path}", self.base));
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let res = req.send().await.map_err(|e| Error::Unreachable("Cloudflare", e.to_string()))?;
+        self.send(req, path).await
+    }
+
+    async fn send(&self, req: reqwest::RequestBuilder, path: &str) -> Result<Value> {
+        let res =
+            req.bearer_auth(&self.token).send().await.map_err(|e| Error::Unreachable("Cloudflare", e.to_string()))?;
         let status = res.status();
         let value: Value = res.json().await.unwrap_or(Value::Null);
         if !status.is_success() || value["success"] != Value::Bool(true) {
@@ -81,6 +86,15 @@ impl Cloudflare {
             return Err(Error::Refused("Cloudflare", format!("{status} on {path}: {errors}")));
         }
         Ok(value)
+    }
+
+    /// Whether the token may read `path`: how Henry checks a permission
+    /// without changing anything.
+    pub async fn reaches(&self, path: &str) -> std::result::Result<(), String> {
+        self.call(reqwest::Method::GET, &format!("/accounts/{}{path}", self.account), None)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// The configured zone a host belongs to: the longest suffix match.
@@ -214,6 +228,74 @@ impl Cloudflare {
                 return Ok(out);
             }
             page += 1;
+        }
+    }
+}
+
+/// The boundary between parts of a Worker upload, made from its contents so
+/// it never appears inside one.
+fn boundary(parts: &[&str]) -> String {
+    (0..)
+        .map(|i| format!("henry-worker-upload-{i}"))
+        .find(|b| !parts.iter().any(|p| p.contains(b.as_str())))
+        .expect("an unbounded range finds a boundary")
+}
+
+/// A Worker upload as `multipart/form-data`: its metadata, then each module.
+pub fn multipart(upload: &crate::workers::Upload) -> (String, Vec<u8>) {
+    let metadata = upload.metadata().to_string();
+    let mut parts: Vec<&str> = vec![&metadata];
+    parts.extend(upload.modules.iter().map(|(_, src)| src.as_str()));
+    let b = boundary(&parts);
+    let mut body = format!(
+        "--{b}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n"
+    );
+    for (name, src) in &upload.modules {
+        body.push_str(&format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}\"\r\n\
+             Content-Type: application/javascript+module\r\n\r\n{src}\r\n"
+        ));
+    }
+    body.push_str(&format!("--{b}--\r\n"));
+    (format!("multipart/form-data; boundary={b}"), body.into_bytes())
+}
+
+impl crate::workers::Edge for Cloudflare {
+    async fn subdomain(&self) -> Result<String> {
+        let v = self.call(reqwest::Method::GET, &format!("/accounts/{}/workers/subdomain", self.account), None).await?;
+        v["result"]["subdomain"].as_str().filter(|s| !s.is_empty()).map(str::to_owned).ok_or_else(|| {
+            Error::Refused(
+                "Cloudflare",
+                "the account has no workers.dev subdomain; pick one under Workers & Pages in the dashboard".into(),
+            )
+        })
+    }
+
+    async fn upload(&self, script: &str, upload: &crate::workers::Upload) -> Result<()> {
+        let path = format!("/accounts/{}/workers/scripts/{script}", self.account);
+        let (content_type, body) = multipart(upload);
+        let req = self
+            .client
+            .request(reqwest::Method::PUT, format!("{}{path}", self.base))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+        self.send(req, &path).await.map(|_| ())
+    }
+
+    async fn enable_subdomain(&self, script: &str) -> Result<()> {
+        let path = format!("/accounts/{}/workers/scripts/{script}/subdomain", self.account);
+        self.call(reqwest::Method::POST, &path, Some(json!({ "enabled": true, "previews_enabled": false })))
+            .await
+            .map(|_| ())
+    }
+
+    async fn delete(&self, script: &str) -> Result<()> {
+        let path = format!("/accounts/{}/workers/scripts/{script}?force=true", self.account);
+        match self.call(reqwest::Method::DELETE, &path, None).await {
+            Ok(_) => Ok(()),
+            // Already gone: 10007 is Cloudflare's "no such script".
+            Err(Error::Refused(_, why)) if why.contains("10007") || why.starts_with("404") => Ok(()),
+            Err(e) => Err(e),
         }
     }
 }

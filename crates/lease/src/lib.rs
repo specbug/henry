@@ -17,7 +17,7 @@ mod size;
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub use check::Limits;
+pub use check::{Limits, is_name};
 pub use size::{format_bytes, parse_bytes};
 
 /// A validated lease.
@@ -28,6 +28,32 @@ pub struct Lease {
     pub auto_deploy: bool,
     pub ai: Option<AiPrefs>,
     pub services: Vec<Service>,
+    pub workers: Vec<Worker>,
+}
+
+/// A Cloudflare Worker in the repo. Henry deploys it to Cloudflare as
+/// `henry-<app>-<name>`; it never runs on the Mac.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worker {
+    pub name: String,
+    /// The directory holding its `wrangler.toml`, relative to the repo root.
+    pub dir: String,
+    /// R2 bindings. Each is the Worker's own corner of Henry's bucket.
+    pub buckets: Vec<String>,
+    /// The Worker's secret names, each given the value of an app secret.
+    pub secrets: BTreeMap<String, String>,
+    /// The app secret Henry sets to the Worker's URL once it is deployed.
+    pub url: Option<String>,
+}
+
+/// The longest script name Cloudflare takes.
+pub const SCRIPT_MAX: usize = 63;
+
+impl Worker {
+    /// The script's name on Cloudflare: Henry's, and this app's.
+    pub fn script(&self, app: &str) -> String {
+        format!("henry-{app}-{}", self.name)
+    }
 }
 
 /// The model Ghost uses for this app, overriding the global default.
