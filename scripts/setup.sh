@@ -158,18 +158,42 @@ bold "Backups to R2"
 if has ark; then
     note "[ark] is set; keeping it"
 elif yes_no "Set up backups now? (You can run this script again later to add them.)"; then
-    steps "dash.cloudflare.com → R2 Object Storage → Create bucket, e.g. henry-backups." \
-        "R2 Object Storage → Manage API tokens → Create API token." \
-        "Permissions: Object Read & Write. Apply to specific buckets only → that bucket." \
-        "Create. Copy the Access Key ID and the Secret Access Key: they are shown once."
-    bucket=$(ask "Bucket" "henry-backups")
+    steps "dash.cloudflare.com → R2 Object Storage → Create bucket (any name, e.g. henry-backups)." \
+        "Back on R2 Object Storage: API (on the right) → Manage API tokens → Create Account API token." \
+        "Permissions: Object Read & Write. Specify bucket(s): Apply to specific buckets only → your bucket." \
+        "Create API Token. The next page shows an Access Key ID and a Secret Access Key, once: copy both."
+    note "These keys come only from that R2 page: your Cloudflare API token is not them, and"
+    note "adding R2 permissions to it does not make them."
+    bucket=$(ask "Bucket name, exactly as you created it" "henry-backups")
     printf '\n[ark]\nrepository = "s3:https://%s.r2.cloudflarestorage.com/%s/henry"\n' "$ACCOUNT" "$bucket" >>"$CONF"
     brew list --formula restic >/dev/null 2>&1 || brew install --quiet restic
     note "restic: $(brew list --versions restic)"
 fi
+if has ark && ! { is_set R2_ACCESS_KEY_ID && is_set R2_SECRET_ACCESS_KEY; }; then
+    REPO=$(value repository)
+    command -v restic >/dev/null || brew install --quiet restic
+    note "The R2 keys, from the page that appeared when you created the R2 token:"
+    while :; do
+        kid=$(hidden "R2 Access Key ID")
+        ksec=$(hidden "R2 Secret Access Key")
+        # Ask the bucket for the repository's config with these keys, through
+        # the environment. restic exits 10 when the repository is not there
+        # yet and 12 when it is but the password differs: either way the keys
+        # reached the bucket. Anything else means they did not.
+        err=$(AWS_ACCESS_KEY_ID=$kid AWS_SECRET_ACCESS_KEY=$ksec RESTIC_PASSWORD=checking-keys-only \
+            RESTIC_REPOSITORY=$REPO restic cat config 2>&1 >/dev/null) && code=0 || code=$?
+        if [[ $code == 0 || $code == 10 || $code == 12 ]]; then
+            seal R2_ACCESS_KEY_ID "$kid"
+            seal R2_SECRET_ACCESS_KEY "$ksec"
+            break
+        fi
+        note "R2 refused them: $(printf '%s\n' "$err" | grep -v '^$' | tail -1)"
+        note "Check the keys, and that the token covers the bucket in $REPO."
+        yes_no "Try again?" || die "Stopped; the R2 keys were not kept. Run this script again to finish."
+    done
+    unset kid ksec err
+fi
 if has ark; then
-    is_set R2_ACCESS_KEY_ID || seal R2_ACCESS_KEY_ID "$(hidden "R2 Access Key ID")"
-    is_set R2_SECRET_ACCESS_KEY || seal R2_SECRET_ACCESS_KEY "$(hidden "R2 Secret Access Key")"
     if ! is_set RESTIC_PASSWORD; then
         note "Choose a password for the backups and save it in your password manager:"
         note "without it, nothing can be restored."
