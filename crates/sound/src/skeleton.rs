@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ComposeService, Need, Survey, image_kind, looks_secret};
+use crate::{ComposeService, Need, Site, Survey, image_kind, looks_secret};
 
 /// Where an app is going: its name, branch and public hostname.
 #[derive(Debug, Clone)]
@@ -156,10 +156,20 @@ impl Survey {
             return Some(Skeleton { plan, source: SkeletonSource::Repo, gaps: vec![] });
         }
         let mut gaps = Vec::new();
+        let mut files = Vec::new();
+        for w in &self.workers {
+            gaps.push(format!(
+                "`{w}` is a Cloudflare Worker: it stays on Cloudflare, deployed with wrangler; Henry does not run it"
+            ));
+        }
         let mut services = if let Some(c) = self.compose.as_ref().filter(|c| !c.services.is_empty()) {
             from_compose(&c.services, &mut gaps)
         } else {
-            vec![self.dockerfile_service(&mut gaps).or_else(|| self.stack_service(&mut gaps))?]
+            vec![
+                self.dockerfile_service(&mut gaps)
+                    .or_else(|| self.site.as_ref().map(|site| self.site_service(site, &mut files, &mut gaps)))
+                    .or_else(|| self.stack_service(&mut gaps))?,
+            ]
         };
         if services.is_empty() {
             return None;
@@ -198,7 +208,7 @@ impl Survey {
 
         let lease = write_lease(ask, &services);
         let notes = format!("drafted by Sound from the repo; {} guess(es)", gaps.len());
-        Some(Skeleton { plan: Plan { lease, files: vec![], generate, notes }, source: SkeletonSource::Sound, gaps })
+        Some(Skeleton { plan: Plan { lease, files, generate, notes }, source: SkeletonSource::Sound, gaps })
     }
 
     fn dockerfile_service(&self, gaps: &mut Vec<String>) -> Option<Svc> {
@@ -224,6 +234,119 @@ impl Survey {
         }
         svc.health = Some("tcp = true".into());
         Some(svc)
+    }
+
+    /// A static site, served by Caddy from an image Henry writes: only the
+    /// published files, as Vercel would serve them. A build command runs as
+    /// the container starts, so it sees the app's secrets as a Vercel build
+    /// sees its env, and no image holds them.
+    fn site_service(&self, site: &Site, files: &mut Vec<(String, String)>, gaps: &mut Vec<String>) -> Svc {
+        let dir = format!("{OVERLAY_DIR}site");
+        let mut svc = Svc {
+            name: "web".into(),
+            build: format!("{{ dockerfile = {}, context = \".\" }}", q(&format!("{dir}/Dockerfile"))),
+            port: Some(8080),
+            health: Some("http = \"/\"".into()),
+            ..Svc::default()
+        };
+        let mut docker = format!("# Written by Henry for a static site (from {}); see site.sh.\n", site.from);
+        docker.push_str("FROM alpine:3.22 AS source\nCOPY . /src\n");
+        match &site.build {
+            None => {
+                let _ = write!(
+                    docker,
+                    "RUN sh /src/{dir}/site.sh prune && SITE_OUT={out} sh /src/{dir}/site.sh publish /site\n\n\
+                     FROM caddy:2-alpine\nCOPY --from=source /site /srv\nEXPOSE 8080\n\
+                     CMD [\"caddy\", \"file-server\", \"--root\", \"/srv\", \"--listen\", \":8080\"]\n",
+                    out = site.output
+                );
+            }
+            Some(build) => {
+                let _ = write!(
+                    docker,
+                    "RUN sh /src/{dir}/site.sh prune\n\nFROM node:22-alpine\n\
+                     COPY --from=caddy:2-alpine /usr/bin/caddy /usr/bin/caddy\n\
+                     COPY --from=source /src /src\nWORKDIR /src\n"
+                );
+                if let Some(install) = self.site_install(site) {
+                    files.push((
+                        format!("{dir}/install.sh"),
+                        script(&format!("installs the site's build tools ({})", site.from), &install),
+                    ));
+                    let _ = writeln!(docker, "RUN sh {dir}/install.sh");
+                }
+                let _ = write!(
+                    docker,
+                    "ENV SITE_OUT={}\nEXPOSE 8080\nCMD [\"sh\", \"/src/{dir}/site.sh\", \"serve\"]\n",
+                    site.output
+                );
+                files
+                    .push((format!("{dir}/build.sh"), script(&format!("the site's build, from {}", site.from), build)));
+                let tool = build.split_whitespace().next().unwrap_or_default();
+                if !["node", "npm", "npx", "pnpm", "yarn", "corepack", "sh"].contains(&tool) {
+                    gaps.push(format!("the build `{build}` runs in node:22-alpine, which may not have `{tool}`"));
+                }
+                let reads = self.build_reads(build);
+                if !reads.is_empty() {
+                    gaps.push(format!(
+                        "the build reads {}: each is a secret the app waits on, as a Vercel build reads its env",
+                        reads.join(", ")
+                    ));
+                }
+                svc.secrets.extend(reads);
+            }
+        }
+        files.push((format!("{dir}/Dockerfile"), docker));
+        files.push((format!("{dir}/site.sh"), include_str!("site.sh").to_owned()));
+        files.sort();
+        if !site.unsupported.is_empty() {
+            gaps.push(format!("vercel.json's {} are not carried over", site.unsupported.join(", ")));
+        }
+        if site.reincludes {
+            gaps.push(".vercelignore re-includes files with `!`; Henry leaves them out too".into());
+        }
+        svc
+    }
+
+    /// How the site's build gets its tools: what vercel.json says, else the
+    /// lockfile's own installer. None without a root package.json.
+    fn site_install(&self, site: &Site) -> Option<String> {
+        if let Some(install) = &site.install {
+            return Some(install.clone());
+        }
+        let has = |f: &str| self.files.iter().any(|x| x == f);
+        if !has("package.json") {
+            return None;
+        }
+        Some(
+            if has("package-lock.json") {
+                "npm ci"
+            } else if has("pnpm-lock.yaml") {
+                "corepack enable && pnpm install --frozen-lockfile"
+            } else if has("yarn.lock") {
+                "corepack enable && yarn install --frozen-lockfile"
+            } else {
+                "npm install"
+            }
+            .into(),
+        )
+    }
+
+    /// The env vars a build command reads: those read in a file the command
+    /// names, or, for a command naming none (`npm run build`), every one the
+    /// code reads.
+    fn build_reads(&self, build: &str) -> Vec<String> {
+        let named: Vec<&str> = build
+            .split_whitespace()
+            .map(|w| w.trim_matches(['"', '\'']).trim_start_matches("./"))
+            .filter(|w| self.files.iter().any(|f| f == w))
+            .collect();
+        self.env
+            .iter()
+            .filter(|(_, v)| !v.read_in.is_empty())
+            .filter(|(_, v)| named.is_empty() || v.read_in.iter().any(|f| named.contains(&f.as_str())))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn stack_service(&self, gaps: &mut Vec<String>) -> Option<Svc> {
@@ -478,6 +601,11 @@ fn from_compose(compose: &[ComposeService], gaps: &mut Vec<String>) -> Vec<Svc> 
         s.depends_on.retain(|d| names.contains(d));
     }
     out
+}
+
+/// A shell script Henry writes into the checkout: what it is, then `body`.
+fn script(what: &str, body: &str) -> String {
+    format!("#!/bin/sh\n# Written by Henry: {what}.\nset -e\n{}\n", body.trim_end())
 }
 
 /// TOML string quoting.

@@ -20,6 +20,9 @@ use regex::Regex;
 
 pub use skeleton::{Ask, Generate, OVERLAY_DIR, Plan, Skeleton, SkeletonSource, placeholders};
 
+/// Frameworks that make a Node app a server, not a site of files.
+const SERVERS: &[&str] = &["next", "nuxt", "@sveltejs/kit", "astro", "@remix-run/node", "express", "fastify", "hono"];
+
 /// Directories never worth reading: dependencies, build output, VCS.
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -83,10 +86,37 @@ pub struct Survey {
     pub needs: BTreeSet<Need>,
     /// Commands from CI and Procfiles: how the authors build, test and start.
     pub hints: Vec<String>,
+    /// A site of files, as Vercel would serve it: no server of its own.
+    pub site: Option<Site>,
+    /// Directories holding a Cloudflare Worker (`wrangler.toml`). Workers
+    /// run on Cloudflare, deployed with wrangler; Henry never runs them.
+    pub workers: Vec<String>,
     /// Every file read, relative to the root, in walk order.
     pub files: Vec<String>,
     /// The walk stopped at its limit; `files` is not the whole repo.
     pub truncated: bool,
+    vercel: Option<String>,
+    vercel_reincludes: bool,
+    root_index: bool,
+    /// Backing services each manifest's dependencies suggest, by directory.
+    manifest_needs: Vec<(String, Vec<Need>)>,
+}
+
+/// A static site: how it is built, and which directory is published.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Site {
+    /// What described it: `vercel.json`, a framework (`vite`), or `index.html`.
+    pub from: String,
+    /// Run in the repo root before publishing, with the app's env.
+    pub build: Option<String>,
+    /// Installs the build's dependencies, in the image.
+    pub install: Option<String>,
+    /// The directory served, relative to the root.
+    pub output: String,
+    /// `vercel.json` settings Henry does not carry over.
+    pub unsupported: Vec<String>,
+    /// `.vercelignore` re-includes files (`!`), which Henry does not do.
+    pub reincludes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +197,8 @@ pub struct Stack {
     pub manifest: String,
     /// The start command the manifest declares, if any.
     pub start: Option<String>,
+    /// The build script, for Node (`scripts.build`).
+    pub build: Option<String>,
     pub framework: Option<String>,
 }
 
@@ -281,6 +313,14 @@ impl Survey {
         let text = || std::fs::read_to_string(path).ok();
         if rel == "lease.toml" {
             self.lease = text();
+        } else if rel == "vercel.json" {
+            self.vercel = text();
+        } else if rel == ".vercelignore" {
+            self.vercel_reincludes = text().is_some_and(|t| t.lines().any(|l| l.trim_start().starts_with('!')));
+        } else if rel == "index.html" {
+            self.root_index = true;
+        } else if ["wrangler.toml", "wrangler.json", "wrangler.jsonc"].contains(&lower.as_str()) {
+            self.workers.push(dir.clone());
         } else if lower == "dockerfile"
             || lower == "containerfile"
             || lower.starts_with("dockerfile.")
@@ -312,7 +352,7 @@ impl Survey {
             self.ci_hints(rel, &t);
         }
         if let Some(stack) = manifest(path, &lower, &dir) {
-            self.needs.extend(needs_from_manifest(path));
+            self.manifest_needs.push((dir.clone(), needs_from_manifest(path)));
             self.stacks.push(stack);
         }
         if is_source(&lower)
@@ -369,6 +409,21 @@ impl Survey {
     /// Mark secrets, drop ambient names, and infer backing services from
     /// the env names the code reads.
     fn settle(&mut self) {
+        // A Worker's code runs on Cloudflare: its manifest is no app to
+        // build, and what it reads is no config of this app's.
+        let workers = self.workers.clone();
+        let in_worker = |path: &str| workers.iter().any(|w| w == "." || path.starts_with(&format!("{w}/")));
+        self.stacks.retain(|s| !in_worker(&format!("{}/", s.dir)));
+        for (dir, needs) in std::mem::take(&mut self.manifest_needs) {
+            if !in_worker(&format!("{dir}/")) {
+                self.needs.extend(needs);
+            }
+        }
+        for var in self.env.values_mut() {
+            var.read_in.retain(|f| !in_worker(f));
+        }
+        self.env.retain(|_, v| v.documented || !v.read_in.is_empty());
+        self.site = self.find_site();
         self.env.retain(|name, _| !AMBIENT.contains(&name.as_str()) && !name.starts_with("HENRY_"));
         for (name, var) in &mut self.env {
             var.secret = looks_secret(name);
@@ -389,6 +444,71 @@ impl Survey {
             }
         }
         self.hints.truncate(MAX_HINTS);
+    }
+
+    /// The static site this repo is, if it is one: nothing at the root that
+    /// serves itself, and something to publish.
+    fn find_site(&self) -> Option<Site> {
+        let root = self.stacks.iter().find(|s| s.dir == ".");
+        let serves_itself = self.stacks.iter().any(|s| s.dir == "." && s.kind != StackKind::Node)
+            || root.is_some_and(|s| s.start.is_some() || s.framework.as_deref().is_some_and(|f| SERVERS.contains(&f)));
+        if serves_itself {
+            return None;
+        }
+        let framework_out = root.and_then(|s| match s.framework.as_deref() {
+            Some("vite") => Some("dist"),
+            Some("react-scripts") => Some("build"),
+            _ => None,
+        });
+        let npm_build = root.and_then(|s| s.build.as_ref()).map(|_| "npm run build".to_owned());
+        let mut site = if let Some(text) = &self.vercel {
+            let v: serde_json::Value = serde_json::from_str(text).ok()?;
+            if v.get("framework").and_then(|f| f.as_str()).is_some_and(|f| !["vite", "create-react-app"].contains(&f)) {
+                return None;
+            }
+            let get = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::trim).map(str::to_owned);
+            // An empty or null buildCommand means no build at all.
+            let build = match v.get("buildCommand") {
+                Some(_) => get("buildCommand").filter(|c| !c.is_empty()),
+                None => npm_build,
+            };
+            let public = self.files.iter().any(|f| f == "public/index.html").then_some("public");
+            let mut unsupported: Vec<String> =
+                ["rewrites", "redirects", "headers", "routes", "cleanUrls", "trailingSlash", "functions", "crons"]
+                    .iter()
+                    .filter(|k| v.get(**k).is_some())
+                    .map(|k| (*k).to_owned())
+                    .collect();
+            if self.files.iter().any(|f| f.starts_with("api/")) {
+                unsupported.push("functions in api/".into());
+            }
+            Site {
+                from: "vercel.json".into(),
+                build,
+                install: get("installCommand").filter(|c| !c.is_empty()),
+                output: get("outputDirectory")
+                    .or(framework_out.map(str::to_owned))
+                    .or(public.map(str::to_owned))
+                    .unwrap_or_else(|| ".".into()),
+                unsupported,
+                ..Site::default()
+            }
+        } else if let Some(out) = framework_out {
+            let framework = root.and_then(|s| s.framework.clone()).unwrap_or_default();
+            Site { from: framework, build: npm_build, output: out.into(), ..Site::default() }
+        } else if self.root_index && root.is_none_or(|s| s.build.is_none()) {
+            Site { from: "index.html".into(), output: ".".into(), ..Site::default() }
+        } else {
+            return None;
+        };
+        let output = site.output.trim_start_matches("./").trim_end_matches('/');
+        site.output = if output.is_empty() { ".".into() } else { output.to_owned() };
+        let plain = site.output.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c));
+        if !plain || site.output.starts_with('/') || site.output.split('/').any(|p| p == "..") {
+            return None;
+        }
+        site.reincludes = self.vercel_reincludes;
+        Some(site)
     }
 
     /// A plain-text summary for Ghost: what is here, without file contents.
@@ -459,6 +579,23 @@ impl Survey {
                 }
                 let _ = writeln!(out, "{name}: {}", what.join("; "));
             }
+        }
+        if let Some(site) = &self.site {
+            let _ = writeln!(
+                out,
+                "\n## Static site (from {})\nbuild {:?}; install {:?}; publishes {}",
+                site.from, site.build, site.install, site.output
+            );
+            if !site.unsupported.is_empty() {
+                let _ = writeln!(out, "not carried over: {}", site.unsupported.join(", "));
+            }
+        }
+        if !self.workers.is_empty() {
+            let _ = writeln!(
+                out,
+                "\n## Cloudflare Workers (stay on Cloudflare, deployed with wrangler; never run by Henry)\n{}",
+                self.workers.join(", ")
+            );
         }
         if !self.needs.is_empty() {
             let _ = writeln!(out, "\n## Backing services it seems to need\n{:?}", self.needs);
@@ -669,18 +806,19 @@ fn manifest(path: &Path, lower: &str, dir: &str) -> Option<Stack> {
         dir: dir.to_owned(),
         manifest: if dir == "." { lower.to_owned() } else { format!("{dir}/{lower}") },
         start,
+        build: None,
         framework,
     };
     match lower {
         "package.json" => {
             let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-            let start = v.pointer("/scripts/start").and_then(|s| s.as_str()).map(str::to_owned);
+            let script =
+                |name: &str| v.pointer(&format!("/scripts/{name}")).and_then(|s| s.as_str()).map(str::to_owned);
             let deps = deps_of(&v);
-            let framework = ["next", "nuxt", "@sveltejs/kit", "astro", "@remix-run/node", "express", "fastify", "hono"]
-                .into_iter()
-                .find(|f| deps.contains(*f))
-                .map(str::to_owned);
-            Some(stack(StackKind::Node, start, framework))
+            // Servers first: a SvelteKit app depends on Vite too.
+            let framework =
+                SERVERS.iter().chain(&["vite", "react-scripts"]).find(|f| deps.contains(**f)).map(|f| (*f).to_owned());
+            Some(Stack { build: script("build"), ..stack(StackKind::Node, script("start"), framework) })
         }
         "pyproject.toml" | "requirements.txt" | "pipfile" => {
             let text = std::fs::read_to_string(path).unwrap_or_default().to_ascii_lowercase();
