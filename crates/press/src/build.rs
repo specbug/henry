@@ -55,7 +55,7 @@ pub struct CliBuilder {
     /// `podman` or `docker`.
     pub program: PathBuf,
     pub timeout: Duration,
-    /// Unset: a Railpack build fails, saying Railpack is not set up.
+    /// Unset: a Railpack build fails, saying how to install it.
     pub railpack: Option<Railpack>,
 }
 
@@ -121,7 +121,11 @@ impl Builder for CliBuilder {
             }
             Recipe::Railpack { dir } => {
                 let Some(rp) = &self.railpack else {
-                    return Err(Error::Build("Railpack is not set up on this Mac: set `[press] railpack`".into()));
+                    return Err(Error::Build(
+                        "Railpack, which builds repos without a Dockerfile, is not installed on this Mac: \
+                         run `henry tools adopt railpack` (scripts/setup.sh does), then try again"
+                            .into(),
+                    ));
                 };
                 self.ensure_buildkit(rp).await?;
                 let mut cmd = Command::new(&rp.program);

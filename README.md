@@ -162,8 +162,9 @@ henry worker                     # what is deployed, where, or why not
 ### Railpack
 
 Repos without a Dockerfile are built by [Railpack](https://railpack.com), which
-needs BuildKit. Install Railpack (`brew install railpack`, or set
-`[press] railpack`); Henry runs BuildKit itself as the `henry-buildkit`
+needs BuildKit. `scripts/setup.sh` installs Railpack with `henry tools adopt
+railpack` (it is not in Homebrew), and Henry keeps it up to date; or set
+`[press] railpack` to one of your own. Henry runs BuildKit itself as the `henry-buildkit`
 container and gives Railpack a `docker` that is Podman. Without Railpack, Ghost
 writes a Dockerfile instead.
 
@@ -481,7 +482,7 @@ The step-by-step for odyssey and draw is [docs/migration.md](docs/migration.md).
 ## Using it
 
 On the Mac, `scripts/setup.sh` does the first-time setup: it builds and
-installs Henry, installs Caddy and cloudflared, asks for your Cloudflare
+installs Henry, installs Caddy, cloudflared and Railpack, asks for your Cloudflare
 account and tunnel ids, checks each token against Cloudflare before sealing
 it, optionally sets up backups to R2, and starts Henry under launchd. Run it
 again any time: it keeps what is set and asks only for what is missing.
