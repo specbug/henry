@@ -46,11 +46,10 @@ for formula in caddy cloudflared; do
 done
 # Railpack builds the repos that have no Dockerfile. It is not in Homebrew:
 # Henry installs its release, checks the checksum, and keeps it up to date.
+# One on your own PATH does not count: Henry runs under launchd, with its own.
 managed=$'\n'$("$H" tools)
 if [[ $managed == *$'\n'"railpack "* ]]; then
     note "railpack: kept up to date by Henry"
-elif command -v railpack >/dev/null; then
-    note "railpack: $(command -v railpack)"
 elif out=$("$H" tools adopt railpack 2>&1); then
     note "${out%%$'\n'*}"
 else
