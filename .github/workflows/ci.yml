@@ -37,6 +37,12 @@ jobs:
           curl -fsSL https://github.com/restic/restic/releases/download/v0.18.1/restic_0.18.1_linux_amd64.bz2 | bunzip2 > restic
           chmod +x restic && sudo mv restic /usr/local/bin/restic
           echo "HENRY_RESTIC=/usr/local/bin/restic" >> "$GITHUB_ENV"
+      - name: Railpack, for Press's real Railpack build
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          curl -fsSL https://github.com/railwayapp/railpack/releases/download/v0.30.0/railpack-v0.30.0-x86_64-unknown-linux-musl.tar.gz | tar xz railpack
+          sudo mv railpack /usr/local/bin/railpack
+          echo "HENRY_RAILPACK=/usr/local/bin/railpack" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
