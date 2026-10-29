@@ -123,7 +123,7 @@ impl Builder for CliBuilder {
                 let Some(rp) = &self.railpack else {
                     return Err(Error::Build(
                         "Railpack, which builds repos without a Dockerfile, is not installed on this Mac: \
-                         run `brew install railpack` (scripts/setup.sh does), then try again"
+                         run `henry tools adopt railpack` (scripts/setup.sh does), then try again"
                             .into(),
                     ));
                 };

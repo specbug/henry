@@ -162,8 +162,9 @@ henry worker                     # what is deployed, where, or why not
 ### Railpack
 
 Repos without a Dockerfile are built by [Railpack](https://railpack.com), which
-needs BuildKit. Install Railpack (`brew install railpack`, or set
-`[press] railpack`); Henry runs BuildKit itself as the `henry-buildkit`
+needs BuildKit. `scripts/setup.sh` installs Railpack with `henry tools adopt
+railpack` (it is not in Homebrew), and Henry keeps it up to date; or set
+`[press] railpack` to one of your own. Henry runs BuildKit itself as the `henry-buildkit`
 container and gives Railpack a `docker` that is Podman. Without Railpack, Ghost
 writes a Dockerfile instead.
 

@@ -40,11 +40,23 @@ fi
 note "$("$H" --version) at $H"
 
 bold "Caddy, cloudflared and Railpack"
-# Railpack builds the repos that have no Dockerfile.
-for formula in caddy cloudflared railpack; do
+for formula in caddy cloudflared; do
     brew list --formula "$formula" >/dev/null 2>&1 || brew install --quiet "$formula"
     note "$formula: $(brew list --versions "$formula")"
 done
+# Railpack builds the repos that have no Dockerfile. It is not in Homebrew:
+# Henry installs its release, checks the checksum, and keeps it up to date.
+managed=$'\n'$("$H" tools)
+if [[ $managed == *$'\n'"railpack "* ]]; then
+    note "railpack: kept up to date by Henry"
+elif command -v railpack >/dev/null; then
+    note "railpack: $(command -v railpack)"
+elif out=$("$H" tools adopt railpack 2>&1); then
+    note "${out%%$'\n'*}"
+else
+    note "Railpack was not installed (${out##*$'\n'}); repos without a Dockerfile wait for it."
+    note "Run \`henry tools adopt railpack\` once GitHub is reachable."
+fi
 
 # Keys pressed while it built would answer the first question; drop them.
 if [[ -t 0 ]]; then
