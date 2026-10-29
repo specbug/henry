@@ -42,12 +42,7 @@ pub fn engine(config: &Config) -> Engine {
 }
 
 fn restic(home: &Home, ac: &ArkConfig, hush: &Hush, repository: &str) -> Result<Restic> {
-    let program = match &ac.restic {
-        Some(p) => p.clone(),
-        None => {
-            home.tool("restic", &crate::daemon::which("restic").unwrap_or_else(|| "/opt/homebrew/bin/restic".into()))
-        }
-    };
+    let program = crate::binaries::restic(home, Some(ac));
     let password = hush
         .get(HOST, RESTIC_PASSWORD)?
         .with_context(|| format!("set henry/{RESTIC_PASSWORD} first, and keep a copy somewhere safe"))?;

@@ -261,13 +261,7 @@ fn draft(
 /// the engine is Podman, Henry's shims directory holds a `docker` that is
 /// Podman.
 fn railpack(home: &Home, config: &Config, engine: &std::path::Path) -> Option<Railpack> {
-    let program = match &config.press.railpack {
-        Some(p) => p.clone(),
-        None => mend::tools::Tools::current(&home.tools(), "railpack").or_else(|| which("railpack")).or_else(|| {
-            let brew = std::path::PathBuf::from("/opt/homebrew/bin/railpack");
-            brew.is_file().then_some(brew)
-        })?,
-    };
+    let program = crate::binaries::railpack(home, config)?;
     let shims = if engine.file_name().is_some_and(|n| n == "docker") {
         None
     } else {
