@@ -23,6 +23,9 @@ pub struct Draft {
     pub release: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When onboarding last started: plans proposed before it were for an
+    /// earlier attempt, and count for nothing now.
+    pub started_at: i64,
 }
 
 /// A plan as weighed: who wrote it, and what became of it.
@@ -56,7 +59,8 @@ pub struct NewProposal<'a> {
     pub notes: &'a str,
 }
 
-const DRAFT_COLS: &str = "app, repo, branch, hostname, stage, round, spent, detail, release, created_at, updated_at";
+const DRAFT_COLS: &str =
+    "app, repo, branch, hostname, stage, round, spent, detail, release, created_at, updated_at, started_at";
 const PROPOSAL_COLS: &str = "id, app, round, source, model, lease, files, generate, notes, verdict, created_at";
 
 impl Canon {
@@ -82,11 +86,11 @@ impl Canon {
         }
         let now = now_ms();
         tx.execute(
-            "INSERT INTO drafts (app, repo, branch, hostname, stage, round, spent, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'survey', 0, 0, ?5, ?5)
+            "INSERT INTO drafts (app, repo, branch, hostname, stage, round, spent, created_at, updated_at, started_at)
+             VALUES (?1, ?2, ?3, ?4, 'survey', 0, 0, ?5, ?5, ?5)
              ON CONFLICT (app) DO UPDATE SET repo = excluded.repo, branch = excluded.branch,
                  hostname = excluded.hostname, stage = 'survey', round = 0, spent = 0, detail = NULL,
-                 release = NULL, updated_at = excluded.updated_at",
+                 release = NULL, updated_at = excluded.updated_at, started_at = excluded.started_at",
             params![app, repo, branch, hostname, now],
         )?;
         record(&tx, Some(app), "draft.started", &format!("onboarding {repo}"), &serde_json::Value::Null)?;
@@ -230,6 +234,8 @@ fn draft_row(r: &Row<'_>) -> rusqlite::Result<Result<Draft>> {
             release: r.get(8)?,
             created_at: r.get(9)?,
             updated_at: r.get(10)?,
+            // Drafts from before migration 9 started when they were made.
+            started_at: r.get::<_, Option<i64>>(11)?.unwrap_or(r.get(9)?),
         })
     })())
 }

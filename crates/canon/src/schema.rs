@@ -214,6 +214,8 @@ const MIGRATIONS: &[&str] = &[
         failed_at   INTEGER,
         PRIMARY KEY (app, worker)
     ) STRICT;",
+    // 9: when a draft last started, so trying again tries every plan anew.
+    "ALTER TABLE drafts ADD COLUMN started_at INTEGER;",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

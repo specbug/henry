@@ -73,6 +73,16 @@ pub struct Railpack {
 /// apps' containers, so it carries no `dev.henry.managed` label and Plumb
 /// leaves it alone.
 pub const BUILDKIT: &str = "henry-buildkit";
+/// The image `henry-buildkit` was started from, as a label: Docker and
+/// Podman spell the image itself differently (`docker.io/` or not).
+const BUILDKIT_IMAGE_LABEL: &str = "dev.henry.image";
+
+/// Whether `inspect` output (`<running> <image label>`) is a running
+/// BuildKit started from `image`.
+fn buildkit_is(seen: &str, image: &str) -> bool {
+    seen.trim().split_once(' ').is_some_and(|(running, label)| running == "true" && label.trim() == image)
+}
+
 /// Railpack's exit code for a failure that says nothing about the app.
 const TEMPFAIL: i32 = 75;
 
@@ -166,13 +176,17 @@ impl CliBuilder {
         Ok(self.engine(&["image", "inspect", "-f", "{{.Id}}", tag]).await.ok().map(|s| s.trim().to_owned()))
     }
 
-    /// Start `henry-buildkit` unless it is running.
+    /// Start `henry-buildkit` unless it is running the configured image. One
+    /// left from an older Henry, or another BuildKit, is replaced: builds run
+    /// one at a time, so none is using it.
     async fn ensure_buildkit(&self, rp: &Railpack) -> Result<()> {
-        let running = self.engine(&["inspect", "-f", "{{.State.Running}}", BUILDKIT]).await;
-        if running.as_deref().map(str::trim) == Ok("true") {
+        let format = format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{BUILDKIT_IMAGE_LABEL}\"}}}}");
+        let seen = self.engine(&["inspect", "-f", &format, BUILDKIT]).await;
+        if seen.as_deref().is_ok_and(|s| buildkit_is(s, &rp.buildkit_image)) {
             return Ok(());
         }
         let _ = self.engine(&["rm", "-f", BUILDKIT]).await;
+        let image_label = format!("{BUILDKIT_IMAGE_LABEL}={}", rp.buildkit_image);
         self.engine(&[
             "run",
             "-d",
@@ -183,6 +197,8 @@ impl CliBuilder {
             "unless-stopped",
             "--label",
             "dev.henry.tool=buildkit",
+            "--label",
+            &image_label,
             &rp.buildkit_image,
         ])
         .await
@@ -209,4 +225,19 @@ pub fn tail(path: &Path, n: usize) -> String {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_running_buildkit_of_the_configured_image_is_kept() {
+        let want = "moby/buildkit:v0.34.0";
+        assert!(buildkit_is("true moby/buildkit:v0.34.0\n", want));
+        assert!(!buildkit_is("false moby/buildkit:v0.34.0", want), "stopped");
+        assert!(!buildkit_is("true moby/buildkit:v0.23.2", want), "an older BuildKit is replaced");
+        assert!(!buildkit_is("true <no value>", want), "one an older Henry started, with no label");
+        assert!(!buildkit_is("", want));
+    }
 }
