@@ -39,8 +39,9 @@ fi
 [[ -x $H ]] || die "henry was built but is not at $H; is ~/.cargo/bin on your PATH?"
 note "$("$H" --version) at $H"
 
-bold "Caddy and cloudflared"
-for formula in caddy cloudflared; do
+bold "Caddy, cloudflared and Railpack"
+# Railpack builds the repos that have no Dockerfile.
+for formula in caddy cloudflared railpack; do
     brew list --formula "$formula" >/dev/null 2>&1 || brew install --quiet "$formula"
     note "$formula: $(brew list --versions "$formula")"
 done

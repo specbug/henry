@@ -22,7 +22,7 @@ cleanup() { "$BIN" uninstall >/dev/null 2>&1 || true; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 # Real tools first, so Homebrew never runs with the fakes on its PATH.
-for f in caddy cloudflared restic; do
+for f in caddy cloudflared railpack restic; do
     brew list --formula "$f" >/dev/null 2>&1 || brew install --quiet "$f"
 done
 
