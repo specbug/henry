@@ -21,7 +21,7 @@ pub const CADDY: &str = "dev.henry.caddy";
 pub const CLOUDFLARED: &str = "dev.henry.cloudflared";
 
 /// Homebrew first: podman, cloudflared, caddy and restic live there.
-const PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+pub(crate) const PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 pub struct Agent {
     pub label: &'static str,
@@ -88,7 +88,7 @@ pub fn caddy(home: &Home, config: &Config) -> Agent {
     Agent {
         label: CADDY,
         args: vec![
-            home.tool("caddy", &config.hinge.caddy).display().to_string(),
+            crate::binaries::caddy(home, config).display().to_string(),
             "run".into(),
             "--resume".into(),
             "--config".into(),

@@ -224,7 +224,7 @@ pub struct CloudflareConfig {
     pub api: String,
 }
 
-fn default_cloudflared() -> std::path::PathBuf {
+pub(crate) fn default_cloudflared() -> std::path::PathBuf {
     "/opt/homebrew/bin/cloudflared".into()
 }
 

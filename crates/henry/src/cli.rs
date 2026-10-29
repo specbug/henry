@@ -360,8 +360,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
             let binary = std::env::current_exe()?.canonicalize()?;
             let config = Config::load(&home.config())?;
             let mut agents = vec![launchd::caddy(&home, &config), launchd::henry(&binary, &home)];
-            if let Some(cf) = &config.cloudflare {
-                agents.insert(1, launchd::cloudflared(&home, &home.tool("cloudflared", &cf.cloudflared)));
+            if config.cloudflare.is_some() {
+                agents.insert(1, launchd::cloudflared(&home, &crate::binaries::cloudflared(&home, &config)));
             }
             if print {
                 for a in &agents {
@@ -792,14 +792,27 @@ fn tools(home: &Home, cmd: Option<ToolsCmd>) -> Result<()> {
             }
         }
         None => {
+            // Every tool Henry runs, as its agents find it, not your shell.
+            let config = Config::load(&home.config())?;
             let managed = canon.tools()?;
-            if managed.is_empty() {
-                println!("Henry manages no tools yet; `henry tools adopt caddy` (or cloudflared, restic, railpack)");
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            for f in crate::binaries::found(home, &config) {
+                let Some(path) = &f.path else {
+                    println!("{:<12} {} — `henry tools adopt {}`", f.name, f.source, f.name);
+                    continue;
+                };
+                let version = rt.block_on(crate::binaries::version(f.name, path)).unwrap_or_else(|| "?".into());
+                let since = managed
+                    .iter()
+                    .find(|t| t.name == f.name)
+                    .map(|t| {
+                        let back = t.previous.as_ref().map(|p| format!(", rolls back to {p}")).unwrap_or_default();
+                        format!(" since {}{back}", utc(t.updated_at))
+                    })
+                    .unwrap_or_default();
+                println!("{:<12} {version}\n{:<12} {} — {}{since}", f.name, "", path.display(), f.source);
             }
-            for t in managed {
-                let prev = t.previous.map(|p| format!(", rolls back to {p}")).unwrap_or_default();
-                println!("{:<12} {}{prev} — since {}", t.name, t.current, utc(t.updated_at));
-            }
+            println!("\nHenry upgrades only its own copies; `henry tools adopt <name>` hands one over.");
         }
     }
     Ok(())

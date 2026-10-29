@@ -3,6 +3,7 @@
 mod adopt;
 mod ai;
 mod backup;
+mod binaries;
 mod cli;
 mod daemon;
 mod edge;
