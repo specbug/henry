@@ -60,15 +60,24 @@ const DRAFT_COLS: &str = "app, repo, branch, hostname, stage, round, spent, deta
 const PROPOSAL_COLS: &str = "id, app, round, source, model, lease, files, generate, notes, verdict, created_at";
 
 impl Canon {
-    /// Begin onboarding `app`. A stuck draft starts over; anything else
-    /// with that name is already taken.
+    /// Begin onboarding `app`. A stuck draft starts over, even once a round
+    /// has registered its app (the next round updates that app's lease), as
+    /// long as it is the same repo; anything else with that name is taken.
     pub fn start_draft(&self, app: &str, repo: &str, branch: Option<&str>, hostname: Option<&str>) -> Result<Draft> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        let taken: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM apps WHERE name = ?1)", [app], |r| r.get(0))?;
+        let registered: Option<String> =
+            tx.query_row("SELECT repo FROM apps WHERE name = ?1", [app], |r| r.get(0)).optional()?;
         let stage: Option<String> =
             tx.query_row("SELECT stage FROM drafts WHERE app = ?1", [app], |r| r.get(0)).optional()?;
-        if taken || stage.as_deref().is_some_and(|s| s != DraftStage::Stuck.as_str()) {
+        let stuck = stage.as_deref() == Some(DraftStage::Stuck.as_str());
+        let free = match (&registered, &stage) {
+            (None, None) => true,
+            (None, Some(_)) => stuck,
+            (Some(r), Some(_)) => stuck && r == repo,
+            (Some(_), None) => false,
+        };
+        if !free {
             return Err(Error::AppExists(app.to_owned()));
         }
         let now = now_ms();

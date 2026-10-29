@@ -327,6 +327,24 @@ fn only_a_stuck_draft_can_start_over() {
 }
 
 #[test]
+fn a_draft_stuck_after_registering_its_app_can_try_again() {
+    let db = Canon::open_in_memory().unwrap();
+    db.start_draft("emend", "https://github.com/me/emend", None, Some("emend.example.com")).unwrap();
+    // A round registered the app, then its build failed.
+    let (lease, text) = lease("emend", "emend.example.com");
+    db.insert_app(&lease, &text, "https://github.com/me/emend", Source::Sound).unwrap();
+    db.set_draft_stage("emend", DraftStage::Stuck, Some("did not build")).unwrap();
+
+    let d = db.start_draft("emend", "https://github.com/me/emend", None, Some("emend.example.com")).unwrap();
+    assert_eq!((d.stage, d.round), (DraftStage::Survey, 0));
+    db.set_draft_stage("emend", DraftStage::Stuck, Some("again")).unwrap();
+    assert!(
+        matches!(db.start_draft("emend", "https://github.com/me/other", None, None), Err(Error::AppExists(_))),
+        "another repo may not take over the name"
+    );
+}
+
+#[test]
 fn proposals_keep_every_plan_and_its_verdict() {
     let db = Canon::open_in_memory().unwrap();
     let files = serde_json::json!({ ".henry/Dockerfile.web": "FROM scratch" });
