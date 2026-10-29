@@ -209,7 +209,10 @@ impl Tools {
         let url = find(&asset).ok_or_else(|| Error::Failed(format!("{} {version} has no {asset}", spec.name)))?;
         let (sums, sha512) = match spec.sums {
             Sums::Sha256(file) | Sums::Sha512(file) => {
+                // GoReleaser's default name, or the plain one a project may
+                // switch to (Railpack did): the digest is checked either way.
                 let list = find(&file(&version))
+                    .or_else(|| matches!(spec.sums, Sums::Sha256(_)).then(|| find("checksums.txt")).flatten())
                     .ok_or_else(|| Error::Failed(format!("{} {version} publishes no checksums", spec.name)))?;
                 (
                     self.get(&list).await?.text().await.map_err(|e| Error::Transient(e.to_string()))?,

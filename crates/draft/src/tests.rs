@@ -17,7 +17,7 @@ use super::*;
 struct FakeBuilder {
     built: Mutex<Vec<String>>,
     /// Railpack builds fail, as when Railpack cannot detect the app.
-    railpack_fails: bool,
+    railpack_fails: std::sync::atomic::AtomicBool,
 }
 
 impl Builder for &'static FakeBuilder {
@@ -28,7 +28,7 @@ impl Builder for &'static FakeBuilder {
     async fn build(&self, req: &BuildRequest<'_>) -> press::Result<()> {
         std::fs::create_dir_all(req.log.parent().unwrap()).unwrap();
         match req.recipe {
-            Recipe::Railpack { .. } if self.railpack_fails => {
+            Recipe::Railpack { .. } if self.railpack_fails.load(std::sync::atomic::Ordering::Relaxed) => {
                 std::fs::write(req.log, "railpack: no start command could be found\n").unwrap();
                 return Err(press::Error::Build("the build exited with exit status: 1".into()));
             }
@@ -104,7 +104,7 @@ fn world(files: &[(&str, &str)], railpack_fails: bool, plans: Vec<Result<Plan, g
     git(&work, &["remote", "add", "origin", &origin]);
     let canon = Arc::new(Canon::open_in_memory().unwrap());
     let hush = Arc::new(Hush::new(canon.clone(), &Key::generate().unwrap()));
-    let builder = Box::leak(Box::new(FakeBuilder { railpack_fails, ..FakeBuilder::default() }));
+    let builder = Box::leak(Box::new(FakeBuilder { railpack_fails: railpack_fails.into(), ..FakeBuilder::default() }));
     let script = Box::leak(Box::new(Script { plans: Mutex::new(plans.into()), ..Script::default() }));
     let w = World { _dir: dir, root, work, origin, canon, hush, builder, script };
     w.push(files);
@@ -386,4 +386,25 @@ fn unset_secrets_are_filled_as_compose_would() {
     assert_eq!(get("CORS_ORIGINS").as_deref(), Some("https://b.example.com"), "the .env's value wins");
     assert_eq!(get("SET").as_deref(), Some("mine"), "a value already set is kept");
     assert_eq!(get("TOKEN"), None, "no default: it waits on you");
+}
+
+#[tokio::test]
+async fn trying_again_tries_the_plan_that_failed_before_the_cause_was_fixed() {
+    // emend: Sound's plan needed Railpack, which was not installed yet.
+    let w = world(&[("package.json", r#"{"scripts": {"start": "node index.js"}}"#)], true, vec![]);
+    w.start();
+    w.work(false, 5).await.unwrap();
+    assert_eq!(w.stage().0, DraftStage::Stuck);
+
+    assert_eq!(w.canon.app("draw").unwrap().status, Status::Stuck);
+
+    // Railpack is installed; you press Try again.
+    w.builder.railpack_fails.store(false, std::sync::atomic::Ordering::Relaxed);
+    w.start();
+    let app = w.canon.app("draw").unwrap();
+    assert_eq!((app.status, app.status_detail), (Status::Onboarding, None), "not stuck while it tries again");
+    w.work(false, 5).await.unwrap();
+    let (stage, detail) = w.stage();
+    assert_eq!(stage, DraftStage::Trial, "Sound's plan was built again: {detail:?}");
+    assert_eq!(w.canon.proposals("draw", 10).unwrap().len(), 2, "the failed attempt stays in the history");
 }

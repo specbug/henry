@@ -102,6 +102,10 @@ pub fn start(
     hostname: Option<&str>,
 ) -> Result<canon::Draft> {
     let draft = canon.start_draft(app, repo, branch, hostname)?;
+    // An app an earlier attempt registered is onboarding again, not stuck.
+    if canon.app(app).is_ok() {
+        canon.set_status(app, Status::Onboarding, None)?;
+    }
     canon.enqueue(JOB, Some(app), &serde_json::json!({}))?;
     Ok(draft)
 }
@@ -275,8 +279,7 @@ impl<B: Builder, P: Planner> Draft<B, P> {
     async fn choose(&self, app: &str, survey: &Survey, ask: &Ask<'_>, dir: &std::path::Path) -> Result<Choice> {
         let skeleton = survey.skeleton(ask);
         let attempts = self.attempts(app)?;
-        let tried =
-            |source: &str| -> Result<bool> { Ok(self.canon.proposals(app, 100)?.iter().any(|p| p.source == source)) };
+        let tried = |source: &str| -> Result<bool> { Ok(self.proposals(app, 100)?.iter().any(|p| p.source == source)) };
         if let Some(s) = skeleton.as_ref().filter(|s| s.source == SkeletonSource::Repo) {
             return Ok(if tried("repo")? {
                 let last = attempts.last().map(|a| a.failure.as_str()).unwrap_or_default();
@@ -319,9 +322,16 @@ impl<B: Builder, P: Planner> Draft<B, P> {
     }
 
     /// Earlier plans that failed, oldest first, the last three.
+    /// Plans proposed since onboarding last started, newest first. Trying
+    /// again starts over: a plan that failed before (Railpack missing, say)
+    /// gets its chance again.
+    fn proposals(&self, app: &str, limit: usize) -> Result<Vec<canon::Proposal>> {
+        let since = self.canon.draft(app)?.map_or(0, |d| d.started_at);
+        Ok(self.canon.proposals(app, limit)?.into_iter().filter(|p| p.created_at >= since).collect())
+    }
+
     fn attempts(&self, app: &str) -> Result<Vec<Attempt>> {
         let mut out: Vec<Attempt> = self
-            .canon
             .proposals(app, 3)?
             .into_iter()
             .filter_map(|p| {

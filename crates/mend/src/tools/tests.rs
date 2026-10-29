@@ -175,3 +175,29 @@ fn checksums_are_found_in_lists_and_notes_and_archives_unpack() {
     assert_eq!(railpack("0.40.1", "macos", "aarch64").as_deref(), Some("railpack-v0.40.1-arm64-apple-darwin.tar.gz"));
     assert_eq!(restic("0.18.1", "macos", "aarch64").as_deref(), Some("restic_0.18.1_darwin_arm64.bz2"));
 }
+
+#[tokio::test]
+async fn a_release_whose_checksums_are_plain_checksums_txt_is_still_verified() {
+    // Railpack's releases list `checksums.txt`, not `railpack_<v>_checksums.txt`.
+    let asset = (spec("railpack").unwrap().asset)("0.30.0", std::env::consts::OS, std::env::consts::ARCH).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let digest = "a".repeat(64);
+    let release = serde_json::json!({
+        "tag_name": "v0.30.0",
+        "assets": [
+            { "name": asset, "browser_download_url": format!("{base}/dl/{asset}") },
+            { "name": "checksums.txt", "browser_download_url": format!("{base}/dl/checksums.txt") },
+        ],
+    });
+    let sums = format!("{digest}  {asset}\n{}  railpack-v0.30.0-x86_64-pc-windows-msvc.zip\n", "b".repeat(64));
+    let app = axum::Router::new()
+        .route("/repos/railwayapp/railpack/releases/latest", get(move || async move { axum::Json(release) }))
+        .route("/dl/checksums.txt", get(move || async move { sums }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let tools = Tools::new(dir.path().to_path_buf(), &base, None).unwrap();
+    let r = tools.latest(spec("railpack").unwrap()).await.unwrap();
+    assert_eq!((r.version.as_str(), r.digest.as_str(), r.sha512), ("0.30.0", digest.as_str(), false));
+}
