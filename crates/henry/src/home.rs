@@ -257,7 +257,9 @@ impl Default for PressConfig {
             poll_seconds: 60,
             build_timeout_minutes: 30,
             railpack: None,
-            buildkit_image: "moby/buildkit:v0.23.2".into(),
+            // The BuildKit Railpack is built against (its go.mod): an older
+            // one can refuse what Railpack asks of it.
+            buildkit_image: "moby/buildkit:v0.34.0".into(),
         }
     }
 }
