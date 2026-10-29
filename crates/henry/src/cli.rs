@@ -785,7 +785,11 @@ fn tools(home: &Home, cmd: Option<ToolsCmd>) -> Result<()> {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             let v = rt.block_on(crate::upkeep::adopt(home, &config, &canon, &hush, &name))?;
             println!("{name} {v} installed in {}", home.tools().join(&name).display());
-            println!("Henry upgrades it weekly from now on; run `henry install` so agents use it");
+            if matches!(name.as_str(), "caddy" | "cloudflared") {
+                println!("Henry upgrades it weekly from now on; run `henry install` so its agent uses it");
+            } else {
+                println!("Henry uses it from its next job, and upgrades it weekly");
+            }
         }
         None => {
             let managed = canon.tools()?;
