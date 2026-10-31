@@ -65,10 +65,11 @@ pub fn run(home: &Home) -> Result<()> {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
+        let (configs, current) = tokio::sync::watch::channel(config.clone());
         let mut side = [
             tokio::spawn(http(home.clone(), config.clone(), canon.clone(), hush.clone())),
-            tokio::spawn(work(home.clone(), config.clone(), canon.clone(), hush.clone())),
-            tokio::spawn(poll(home.clone(), config.clone(), canon.clone(), hush.clone())),
+            tokio::spawn(work(home.clone(), current.clone(), canon.clone(), hush.clone())),
+            tokio::spawn(poll(home.clone(), current, canon.clone(), hush.clone())),
         ];
         let mut term = signal(SignalKind::terminate())?;
         let mut int = signal(SignalKind::interrupt())?;
@@ -85,6 +86,7 @@ pub fn run(home: &Home) -> Result<()> {
                 _ = hup.recv() => match Config::load(&home.config()).and_then(|c| c.limits().map(|_| c)) {
                     Ok(c) => {
                         config = c;
+                        configs.send_replace(config.clone());
                         // Engine and Proof settings take effect on the next connect.
                         engine = None;
                         // Edge settings and Henry's own secrets, now.
@@ -308,7 +310,8 @@ pub(crate) fn builder_program(config: &Config) -> std::path::PathBuf {
 }
 
 /// Run queued jobs, one at a time.
-async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
+async fn work(home: Home, configs: tokio::sync::watch::Receiver<Config>, canon: Arc<Canon>, hush: Arc<Hush>) {
+    let config = configs.borrow().clone();
     // A tool switch cut off mid-check goes back to the version it replaced.
     if let Ok(tools) = mend::tools::Tools::new(home.tools(), &config.mend.github_api, None)
         && let Err(e) = tools.recover(&canon)
@@ -332,6 +335,9 @@ async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
                 continue;
             }
         };
+        // Snapshot once per job. A reload affects the next job without
+        // aborting an in-flight build or losing its claimed queue entry.
+        let config = configs.borrow().clone();
         let outcome = match job.kind.as_str() {
             press::JOB => match press(&home, &config, &hush, canon.clone()) {
                 Ok(p) => p.run(&job).await.map(|o| o.to_string()).map_err(|e| (e.is_transient(), e.to_string())),
@@ -388,11 +394,22 @@ async fn work(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
 }
 
 /// Check every auto-deploying branch for new commits.
-async fn poll(home: Home, config: Config, canon: Arc<Canon>, hush: Arc<Hush>) {
+async fn poll(home: Home, mut configs: tokio::sync::watch::Receiver<Config>, canon: Arc<Canon>, hush: Arc<Hush>) {
+    let config = configs.borrow().clone();
     let mut every = tokio::time::interval(Duration::from_secs(config.press.poll_seconds.max(10)));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        every.tick().await;
+        tokio::select! {
+            _ = every.tick() => {},
+            changed = configs.changed() => {
+                if changed.is_err() { return; }
+                let seconds = configs.borrow().press.poll_seconds.max(10);
+                every = tokio::time::interval(Duration::from_secs(seconds));
+                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                continue;
+            }
+        }
+        let config = configs.borrow().clone();
         match press(&home, &config, &hush, canon.clone()) {
             Ok(p) => match p.poll().await {
                 Ok(queued) if !queued.is_empty() => info!(?queued, "new commits, deploys queued"),
@@ -432,6 +449,43 @@ pub(crate) fn lock(home: &Home) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn later_jobs_use_reloaded_provider_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home { root: dir.path().to_path_buf() };
+        let canon = Arc::new(Canon::open_in_memory().unwrap());
+        let hush = Arc::new(Hush::new(canon.clone(), &hush::Key::generate().unwrap()));
+        let mut config = Config::default();
+        config.ai.default_model = Some("claude/old".into());
+        let (configs, current) = tokio::sync::watch::channel(config.clone());
+        let worker = tokio::spawn(work(home, current, canon.clone(), hush));
+        for (app, expected) in [("before", "ANTHROPIC_API_KEY"), ("after", "META_API_KEY")] {
+            if app == "after" {
+                config.ai.default_model = Some("meta/muse-spark-1.3".into());
+                configs.send_replace(config.clone());
+            }
+            // Missing synthetic credentials fail before Git or any provider request.
+            let job = canon.enqueue(draft::JOB, Some(app), &serde_json::json!({})).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(6), async {
+                loop {
+                    let j = canon.job(job.id).unwrap();
+                    if j.state == canon::JobState::Failed {
+                        break j.error.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if !error.contains(expected) {
+                worker.abort();
+                panic!("expected {expected}, got {error}");
+            }
+        }
+        worker.abort();
+        let _ = worker.await;
+    }
 
     #[test]
     fn only_one_henry_at_a_time() {

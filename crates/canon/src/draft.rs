@@ -103,6 +103,38 @@ impl Canon {
         get_draft(&*self.conn()?, app)
     }
 
+    /// Resume a stuck onboarding without forgetting its plans, spend or
+    /// rounds. Queue the repair atomically so a crash cannot lose it.
+    pub fn retry_draft(&self, app: &str) -> Result<Option<crate::Job>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let now = now_ms();
+        let changed = tx.execute(
+            "UPDATE drafts SET stage = 'plan', detail = 'retry requested', updated_at = ?2
+             WHERE app = ?1 AND stage = 'stuck' AND NOT EXISTS
+             (SELECT 1 FROM jobs WHERE kind = 'draft' AND app = ?1 AND state IN ('queued', 'running'))",
+            params![app, now],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO jobs (kind, app, state, payload, not_before, created_at, updated_at)
+             VALUES ('draft', ?1, 'queued', '{}', ?2, ?2, ?2)",
+            params![app, now],
+        )?;
+        let job = crate::get_job(&tx, tx.last_insert_rowid())?;
+        record(
+            &tx,
+            Some(app),
+            "draft.retry",
+            "retry requested; repair budgets and history retained",
+            &serde_json::Value::Null,
+        )?;
+        tx.commit()?;
+        Ok(Some(job))
+    }
+
     pub fn drafts(&self) -> Result<Vec<Draft>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&format!("SELECT {DRAFT_COLS} FROM drafts ORDER BY created_at"))?;

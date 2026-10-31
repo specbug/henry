@@ -279,6 +279,61 @@ async fn a_failed_proof_starts_a_round_that_knows_why() {
 }
 
 #[tokio::test]
+async fn a_sound_railpack_trial_exiting_zero_is_revised_with_its_failure() {
+    let w = world(
+        &[("package.json", r#"{"scripts":{"start":"node server.js"}}"#), ("server.js", "")],
+        false,
+        vec![ghost_plan("FROM node:22\nCMD [\"node\", \"server.js\"]\n")],
+    );
+    w.start();
+    w.work(true, 5).await.unwrap();
+    assert_eq!(w.canon.app("draw").unwrap().source, Source::Sound);
+    assert_eq!(w.canon.draft("draw").unwrap().unwrap().spent, 0);
+    let first = w.release();
+    w.canon.set_release_state(first, ReleaseState::Failed, Some("failed proof: `web` stopped (exit 0)")).unwrap();
+    assert_eq!(pass(&w.canon, 5).unwrap().retried, ["draw"]);
+    w.work(true, 5).await.unwrap();
+    assert_ne!(w.release(), first);
+    assert_eq!(w.stage().0, DraftStage::Trial);
+    assert!(w.script.seen.lock().unwrap()[0][0].contains("stopped (exit 0)"));
+}
+
+#[tokio::test]
+async fn a_stuck_provider_repair_can_resume_without_resetting_history_or_budget() {
+    let w = world(
+        &[("package.json", r#"{"scripts":{"start":"node server.js"}}"#), ("server.js", "")],
+        false,
+        vec![Err(ghost::Error::Provider("scripted provider refusal".into())), ghost_plan("FROM node:22\n")],
+    );
+    w.start();
+    w.work(true, 5).await.unwrap();
+    let first = w.release();
+    w.canon.set_release_state(first, ReleaseState::Failed, Some("failed proof: `web` stopped (exit 0)")).unwrap();
+    pass(&w.canon, 5).unwrap();
+    w.work(true, 5).await.unwrap();
+    assert_eq!(w.stage().0, DraftStage::Stuck);
+    let before = w.canon.draft("draw").unwrap().unwrap();
+    let proposals = w.canon.proposals("draw", 10).unwrap();
+    w.canon.retry_draft("draw").unwrap().unwrap();
+    assert!(w.canon.retry_draft("draw").unwrap().is_none(), "no duplicate retries");
+    assert_eq!(w.canon.proposals("draw", 10).unwrap(), proposals);
+    let retry = w.canon.draft("draw").unwrap().unwrap();
+    assert_eq!((retry.round, retry.spent), (before.round, before.spent));
+    w.work(true, 5).await.unwrap();
+    assert_eq!(w.stage().0, DraftStage::Trial);
+    assert_ne!(w.release(), first);
+    assert!(w.script.seen.lock().unwrap()[1][0].contains("stopped (exit 0)"));
+
+    // A retry is not a way around the round cap.
+    give_up(&w.canon, "draw", "fixture stopped").unwrap();
+    let round = w.canon.draft("draw").unwrap().unwrap().round;
+    w.canon.retry_draft("draw").unwrap().unwrap();
+    w.work(true, round).await.unwrap();
+    assert_eq!(w.stage().0, DraftStage::Stuck);
+    assert_eq!(w.script.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn the_repair_budget_ends_in_stuck() {
     let broken = || ghost_plan("FROM node:22\nBROKEN\n");
     let w = world(&[("server.js", "")], false, vec![broken(), broken(), broken()]);

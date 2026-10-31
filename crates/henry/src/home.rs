@@ -444,7 +444,7 @@ impl Default for LimitsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AiConfig {
-    /// `provider/model`, e.g. `meta/Llama-4-Maverick-17B-128E-Instruct-FP8`.
+    /// `provider/model`, e.g. `meta/muse-spark-1.3`.
     /// Unset: the first provider with a key, Meta first, at its default model.
     pub default_model: Option<String>,
     /// Plans one onboarding may try before it is stuck.
