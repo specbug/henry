@@ -63,6 +63,19 @@ async fn a_container_round_trip_on_a_real_engine() {
         cpus: 0.5,
     };
     let id = engine.create(&spec).await.unwrap();
+    // A lease without `command` must retain both image startup fields.
+    // Railpack images also rely on their ENTRYPOINT + CMD combination.
+    let docker = std::process::Command::new("docker").arg("--version").output().is_ok_and(|o| o.status.success());
+    let launch = |kind: &str, reference: &str| {
+        let out = std::process::Command::new(if docker { "docker" } else { "podman" })
+            .args([if docker { "--host" } else { "--url" }, &format!("unix://{}", socket.path.display())])
+            .args([kind, "inspect", reference, "--format", "{{json .Config.Entrypoint}} {{json .Config.Cmd}}"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "inspect startup metadata");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(launch("container", &id), launch("image", &spec.image));
     assert!(matches!(engine.create(&spec).await, Err(hold::Error::Conflict(_))));
     engine.start(&id).await.unwrap();
     engine.start(&id).await.unwrap(); // already running is fine

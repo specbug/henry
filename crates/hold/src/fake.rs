@@ -22,6 +22,7 @@ pub struct FakeContainer {
     /// Log lines with the Unix second they were written.
     pub logs: Vec<(i64, String)>,
     pub oom_killed: bool,
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Default)]
@@ -102,6 +103,16 @@ impl Fake {
         });
     }
 
+    /// The process exits on its own, without an engine restart.
+    pub fn exit(&self, name: &str, code: i64) {
+        self.with(|i| {
+            if let Some(c) = i.containers.values_mut().find(|c| c.spec.name == name) {
+                c.state = State::Exited;
+                c.exit_code = Some(code);
+            }
+        });
+    }
+
     /// The container is frozen, as Ark does for the moment of a backup.
     pub fn pause(&self, name: &str, paused: bool) {
         self.with(|i| {
@@ -176,6 +187,7 @@ impl Fake {
                     aliases: vec![],
                     logs: vec![],
                     oom_killed: false,
+                    exit_code: None,
                 },
             );
         });
@@ -274,6 +286,7 @@ impl Runtime for Fake {
                     aliases: spec.aliases.clone(),
                     logs: vec![],
                     oom_killed: false,
+                    exit_code: None,
                 },
             );
             i.ops.push(format!("create {}", spec.name));
@@ -339,7 +352,11 @@ impl Runtime for Fake {
             Ok(Inspection {
                 state: c.state,
                 restart_count: c.restarts,
-                exit_code: (c.state == State::Exited).then_some(if c.oom_killed { 137 } else { 1 }),
+                exit_code: (c.state == State::Exited).then_some(if c.oom_killed {
+                    137
+                } else {
+                    c.exit_code.unwrap_or(1)
+                }),
                 oom_killed: c.oom_killed,
             })
         })

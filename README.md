@@ -126,6 +126,15 @@ Meta's API, Gemini and OpenAI are reached through their OpenAI-compatible
 endpoints; Claude through its own API. `[ai.endpoints]` overrides an endpoint.
 With no key at all, onboarding gets as far as the repo and Sound can take it.
 
+Meta defaults to `meta/muse-spark-1.3` at `https://api.meta.ai/v1`, using
+`/chat/completions` with function tools. Henry keeps the secret name
+`henry/META_API_KEY`. See Meta's [Chat Completions](https://dev.meta.ai/docs/protocols/chat-completions)
+and [tool calling](https://dev.meta.ai/docs/tool-calling) documentation.
+An explicit `[ai] default_model` or `[ai.endpoints] meta` still wins: existing
+installations pinned to the old Llama model or endpoint need their config
+updated too. An old endpoint's 401 does not establish whether a saved key
+works with the current API. No separate key-validation request is needed.
+
 ### Cloudflare Workers
 
 An app may come with a Worker: cairn keeps its sync in one, beside a static
@@ -167,6 +176,16 @@ railpack` (it is not in Homebrew), and Henry keeps it up to date; or set
 `[press] railpack` to one of your own. Henry runs BuildKit itself as the `henry-buildkit`
 container and gives Railpack a `docker` that is Podman. Without Railpack, Ghost
 writes a Dockerfile instead.
+
+After editing `henry.toml`, `henry reload` applies the new provider and build
+settings to subsequent jobs; a running job keeps its original settings.
+Use `henry retry <app>` to resume a stuck onboarding after fixing prerequisites.
+It retains earlier failures, token spend and round counts, and may spend AI
+tokens; it does not reset exhausted repair budgets. `henry deploy <app>`
+rebuilds the stored lease and does not resume a stuck AI repair. See
+[provider and build recovery](docs/provider-build-recovery.md) for updates to
+existing Mac installations and the evidence needed to diagnose an exited web
+process.
 
 ## How Plumb keeps apps running
 

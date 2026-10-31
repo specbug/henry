@@ -77,6 +77,55 @@ fn runs(path: &Path) -> String {
 }
 
 #[tokio::test]
+async fn railpack_uses_the_published_checksum_asset_and_refuses_corruption() {
+    let version = "0.43.0";
+    let spec = spec("railpack").unwrap();
+    let asset = (spec.asset)(version, std::env::consts::OS, std::env::consts::ARCH).unwrap();
+    let mut bytes = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let script = b"#!/bin/sh\necho railpack 0.43.0\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(script.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "railpack", &script[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+    for corrupt in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let release = serde_json::json!({
+            "tag_name": format!("v{version}"),
+            "assets": [
+                {"name": asset, "browser_download_url": format!("{base}/asset")},
+                {"name": "checksums.txt", "browser_download_url": format!("{base}/checksums")}
+            ]
+        });
+        let digest = if corrupt { "0".repeat(64) } else { hex::encode(sha2::Sha256::digest(&bytes)) };
+        let sums = format!("{digest}  {asset}\n");
+        let artifact = bytes.clone();
+        let app = axum::Router::new()
+            .route("/repos/railwayapp/railpack/releases/latest", get(move || async { axum::Json(release) }))
+            .route("/checksums", get(move || async { sums }))
+            .route("/asset", get(move || async { artifact }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let tools = Tools::new(dir.path().join("tools"), &base, None).unwrap();
+        let result = tools.adopt(&Canon::open_in_memory().unwrap(), "railpack").await;
+        if corrupt {
+            assert!(result.is_err(), "a checksum mismatch must never install a tool");
+            assert!(Tools::current(&tools.root, "railpack").is_none());
+        } else {
+            assert_eq!(result.unwrap(), version);
+            assert_eq!(runs(&Tools::current(&tools.root, "railpack").unwrap()), "railpack 0.43.0");
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn a_tool_is_adopted_upgraded_through_its_gate_and_rolled_back_when_it_fails() {
     let h = hub("0.18.1").await;
     let dir = tempfile::tempdir().unwrap();
