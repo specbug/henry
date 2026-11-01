@@ -105,6 +105,9 @@ enum Cmd {
         #[arg(long)]
         commit: Option<String>,
     },
+    /// Resume a stuck onboarding after fixing its prerequisites. Keeps
+    /// earlier plans and repair budgets; may spend AI tokens.
+    Retry { app: String },
     /// Try a release made of images that already exist. Plumb runs it beside
     /// the live release; only Proof can make it live.
     Trial {
@@ -314,6 +317,15 @@ pub fn run(args: Args) -> Result<ExitCode> {
             canon.app(&app)?;
             let job = press::request(&canon, &app, commit.as_deref(), true)?;
             println!("deploy of {app} queued (job {}); the daemon builds it", job.id);
+        }
+        Cmd::Retry { app } => {
+            let job = canon(&home)?.retry_draft(&app)?.context(
+                "no idle stuck onboarding to retry; check `henry show` and wait for any running job to finish",
+            )?;
+            println!(
+                "repair of {app} queued (job {}); earlier plans and budgets retained; may spend AI tokens",
+                job.id
+            );
         }
         Cmd::Trial { app, images } => trial(&home, &app, &images)?,
         Cmd::Start { app } => canon(&home)?.set_desired(&app, Desired::Running)?,

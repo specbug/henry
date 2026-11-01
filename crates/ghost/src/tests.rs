@@ -142,6 +142,42 @@ async fn an_openai_style_provider_reads_proposes_and_repairs() {
 }
 
 #[tokio::test]
+async fn meta_defaults_support_parallel_tools_and_explicit_overrides() {
+    let (endpoint, default_model, key) = defaults(Provider::Meta);
+    assert_eq!((endpoint, default_model, key), ("https://api.meta.ai/v1", "muse-spark-1.3", "META_API_KEY"));
+    let mut parallel = openai_call("read", "read_file", json!({ "path": "server.js" }));
+    let second = openai_call("list", "list_files", json!({ "dir": "." }));
+    parallel["choices"][0]["message"]["tool_calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(second["choices"][0]["message"]["tool_calls"][0].clone());
+    let (base, script) = server(vec![(200, parallel), (200, openai_call("plan", "propose", good_plan()))]).await;
+    // Only a synthetic key and a local endpoint: never contact Meta in tests.
+    let model = Model::connect(Provider::Meta, default_model, hush::Secret::new("test-only"), Some(&base)).unwrap();
+    let repo = repo();
+    propose(&model, &repo, &[], 1_000_000).await.plan.unwrap();
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(s.requests[0].1["model"], default_model);
+        assert!(s.requests[0].1.get("tool_choice").is_none(), "Meta supports only auto, the default");
+        let messages = s.requests[1].1["messages"].as_array().unwrap();
+        let results: Vec<_> = messages.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["tool_call_id"], "read");
+        assert_eq!(results[1]["tool_call_id"], "list");
+        assert!(results[0]["content"].as_str().unwrap().contains("app.listen(3000)"));
+        assert_eq!(messages[2]["tool_calls"].as_array().unwrap().len(), 2);
+    }
+
+    let (base, script) = server(vec![(200, openai_text("custom model"))]).await;
+    let model =
+        Model::connect(Provider::Meta, "custom-model", hush::Secret::new("test-only"), Some(&format!("{base}/")))
+            .unwrap();
+    assert_eq!(model.chat("system", &[Turn::User("hi".into())], &[]).await.unwrap().text, "custom model");
+    assert_eq!(script.lock().unwrap().requests[0].1["model"], "custom-model");
+}
+
+#[tokio::test]
 async fn claude_speaks_its_own_wire_format() {
     let (base, script) = server(vec![
         (200, claude_call("t1", "list_files", json!({ "dir": "." }))),

@@ -190,6 +190,20 @@ async fn a_crash_during_the_soak_fails_it() {
 }
 
 #[tokio::test]
+async fn a_web_process_exiting_zero_fails_proof_even_if_its_port_answers() {
+    let w = world();
+    let r = w.trying(LEASE).await;
+    w.passes(1).await;
+    assert_eq!(w.release(r).state, ReleaseState::Proof);
+    // Keep the fixture's healthy HTTP responder alive. A successful probe
+    // must never compensate for the service process having stopped.
+    w.fake.exit(&format!("draw-web-r{r}"), 0);
+    w.proof.pass().await.unwrap();
+    assert_eq!(w.release(r).state, ReleaseState::Failed);
+    assert!(w.reason(r).contains("`web` stopped (exit 0)"), "{}", w.reason(r));
+}
+
+#[tokio::test]
 async fn a_crash_in_the_logs_fails_it() {
     let w = world();
     let r = w.trying(LEASE).await;

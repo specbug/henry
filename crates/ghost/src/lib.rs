@@ -107,7 +107,7 @@ pub struct Reply {
 /// key in Henry's own scope.
 pub fn defaults(provider: Provider) -> (&'static str, &'static str, &'static str) {
     match provider {
-        Provider::Meta => ("https://api.llama.com/compat/v1", "Llama-4-Maverick-17B-128E-Instruct-FP8", "META_API_KEY"),
+        Provider::Meta => ("https://api.meta.ai/v1", "muse-spark-1.3", "META_API_KEY"),
         Provider::Gemini => {
             ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-pro", "GEMINI_API_KEY")
         }

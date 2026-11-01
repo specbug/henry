@@ -58,7 +58,7 @@ mod tests {
         h.set(HOST, "ANTHROPIC_API_KEY", &hush::Secret::new("k")).unwrap();
         assert_eq!(planner(&config, &h).unwrap().unwrap().name(), "claude/claude-sonnet-5-5");
         h.set(HOST, "META_API_KEY", &hush::Secret::new("k")).unwrap();
-        assert!(planner(&config, &h).unwrap().unwrap().name().starts_with("meta/"));
+        assert_eq!(planner(&config, &h).unwrap().unwrap().name(), "meta/muse-spark-1.3");
     }
 
     #[test]
